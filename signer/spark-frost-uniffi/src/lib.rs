@@ -12,7 +12,7 @@ use bitcoin::{
     key::Secp256k1,
     sighash::{Prevouts, SighashCache},
     transaction::Version,
-    Address, Amount, OutPoint, ScriptBuf, Sequence, TapSighashType, Transaction, TxIn, TxOut, Txid,
+    Address, Amount, OutPoint, ScriptBuf, Sequence, TapSighashType, Transaction, TxIn, TxOut,
     Witness,
 };
 use ecies::{decrypt, encrypt};
@@ -601,39 +601,10 @@ pub struct DummyTx {
 
 #[wasm_bindgen]
 pub fn create_dummy_tx(address: String, amount_sats: u64) -> Result<DummyTx, Error> {
-    // Create the input
-    let input = TxIn {
-        previous_output: OutPoint {
-            txid: Txid::from_slice(&[0; 32]).unwrap(),
-            vout: 0,
-        },
-        script_sig: ScriptBuf::new(), // Empty for now, will be filled by the signing process
-        sequence: Sequence::from_height(0), // Default sequence number
-        witness: Witness::new(),      // Empty witness for now
-    };
-
-    let dest_address = Address::from_str(&address)
-        .map_err(|e| Error::Spark(e.to_string()))?
-        .assume_checked();
-
-    // Create the P2TR output
-    let output = TxOut {
-        value: Amount::from_sat(amount_sats),
-        script_pubkey: dest_address.script_pubkey(),
-    };
-
-    // Construct the transaction with version 2 for Taproot support
-    let new_tx = Transaction {
-        version: Version::TWO,
-        lock_time: LockTime::ZERO,
-        input: vec![input],
-        output: vec![output],
-    };
-
-    Ok(DummyTx {
-        tx: bitcoin::consensus::serialize(&new_tx),
-        txid: new_tx.compute_txid().to_string(),
-    })
+    match spark_frost::tx::create_dummy_tx(&address, amount_sats) {
+        Ok(inner) => Ok(DummyTx { tx: inner.tx, txid: inner.txid }),
+        Err(e) => Err(Error::Spark(e)),
+    }
 }
 
 fn log_to_file(message: &str) {

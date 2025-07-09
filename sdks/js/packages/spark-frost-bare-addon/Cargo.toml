@@ -9,3 +9,4 @@ path = "binding.rs"
 
 [dependencies]
 bare-rust = "0.0.1"
+spark-frost = { path = "../../../../signer/spark-frost" }
