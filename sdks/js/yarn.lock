@@ -1795,6 +1795,18 @@ __metadata:
   languageName: unknown
   linkType: soft
 
+"@buildonspark/spark-frost-bare-addon@workspace:packages/spark-frost-bare-addon":
+  version: 0.0.0-use.local
+  resolution: "@buildonspark/spark-frost-bare-addon@workspace:packages/spark-frost-bare-addon"
+  dependencies:
+    cmake-bare: "npm:^1.6.5"
+    cmake-cargo: "npm:^0.0.0"
+    cmake-npm: "npm:^1.1.0"
+    prettier: "npm:^3.5.1"
+    prettier-config-standard: "npm:^7.0.0"
+  languageName: unknown
+  linkType: soft
+
 "@buildonspark/spark-sdk@npm:0.1.44, @buildonspark/spark-sdk@npm:^0.1.28, @buildonspark/spark-sdk@npm:^0.1.44, @buildonspark/spark-sdk@workspace:packages/spark-sdk":
   version: 0.0.0-use.local
   resolution: "@buildonspark/spark-sdk@workspace:packages/spark-sdk"
@@ -8617,6 +8629,29 @@ __metadata:
   version: 1.0.4
   resolution: "clone@npm:1.0.4"
   checksum: 10/d06418b7335897209e77bdd430d04f882189582e67bd1f75a04565f3f07f5b3f119a9d670c943b6697d0afb100f03b866b3b8a1f91d4d02d72c4ecf2bb64b5dd
+  languageName: node
+  linkType: hard
+
+"cmake-bare@npm:^1.6.5":
+  version: 1.6.5
+  resolution: "cmake-bare@npm:1.6.5"
+  dependencies:
+    cmake-npm: "npm:^1.1.0"
+  checksum: 10/566b64801534cce0f0d9af1332bae44a6f954d8fbb6933a499a2dccabba61b04d86335faf647b914f09b289fedde39a5c292b29986c3291d3119dd14125e2f11
+  languageName: node
+  linkType: hard
+
+"cmake-cargo@npm:^0.0.0":
+  version: 0.0.0
+  resolution: "cmake-cargo@npm:0.0.0"
+  checksum: 10/7cb748a8a001a96eaeefa9559e6affb2601a521aace36725e5422792442d33b850dcccbf2baea5dce46c48c14cb7b161b11b0e561186f9c8e731357bd2d24a0b
+  languageName: node
+  linkType: hard
+
+"cmake-npm@npm:^1.1.0":
+  version: 1.1.0
+  resolution: "cmake-npm@npm:1.1.0"
+  checksum: 10/f76a61bc287cef7fefa8faff2cdc4961f04685419a7743e6023a3adb38cdaa2c71505b6d5d3918b9f868e4c53f3feec3107fdb3a214bae6b24f401774ed87f28
   languageName: node
   linkType: hard
 
@@ -16860,6 +16895,15 @@ __metadata:
   version: 1.2.1
   resolution: "prelude-ls@npm:1.2.1"
   checksum: 10/0b9d2c76801ca652a7f64892dd37b7e3fab149a37d2424920099bf894acccc62abb4424af2155ab36dea8744843060a2d8ddc983518d0b1e22265a22324b72ed
+  languageName: node
+  linkType: hard
+
+"prettier-config-standard@npm:^7.0.0":
+  version: 7.0.0
+  resolution: "prettier-config-standard@npm:7.0.0"
+  peerDependencies:
+    prettier: ^2.6.0 || ^3.0.0
+  checksum: 10/911ef42987fc80a12f6773a62eddc4fdd59362d15002af2b95854c89e9e31d31bda9d704c5b7dd5845ce901982a7d7c71a8fa216b698cf79b1f9e538f3aec45a
   languageName: node
   linkType: hard
 

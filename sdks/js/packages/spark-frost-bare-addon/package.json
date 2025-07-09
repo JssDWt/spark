@@ -1,0 +1,41 @@
+{
+  "private": true,
+  "name": "@buildonspark/spark-frost-bare-addon",
+  "version": "1.0.0",
+  "description": "Example Bare addon",
+  "exports": {
+    "./package": "./package.json",
+    ".": "./index.js"
+  },
+  "files": [
+    "index.js",
+    "binding.c",
+    "binding.js",
+    "CMakeLists.txt",
+    "prebuilds"
+  ],
+  "addon": true,
+  "scripts": {
+    "test": "prettier . --check && bare test.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/holepunchto/bare-addon-rust.git"
+  },
+  "author": "Holepunch",
+  "license": "Apache-2.0",
+  "bugs": {
+    "url": "https://github.com/holepunchto/bare-addon-rust/issues"
+  },
+  "homepage": "https://github.com/holepunchto/bare-addon-rust#readme",
+  "installConfig": {
+    "hoistingLimits": "dependencies"
+  },
+  "devDependencies": {
+    "cmake-bare": "^1.6.5",
+    "cmake-cargo": "^0.0.0",
+    "cmake-npm": "^1.1.0",
+    "prettier": "^3.5.1",
+    "prettier-config-standard": "^7.0.0"
+  }
+}
