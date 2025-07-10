@@ -33,7 +33,7 @@
   },
   "devDependencies": {
     "cmake-bare": "^1.6.5",
-    "cmake-cargo": "^0.0.0",
+    "cmake-cargo": "^0.0.4",
     "cmake-npm": "^1.1.0",
     "prettier": "^3.5.1",
     "prettier-config-standard": "^7.0.0"

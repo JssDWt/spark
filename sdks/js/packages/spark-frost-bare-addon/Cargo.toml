@@ -8,5 +8,5 @@ crate-type = ["staticlib"]
 path = "binding.rs"
 
 [dependencies]
-bare-rust = "0.0.1"
+bare-rust = "0.0.3"
 spark-frost = { path = "../../../../signer/spark-frost" }
