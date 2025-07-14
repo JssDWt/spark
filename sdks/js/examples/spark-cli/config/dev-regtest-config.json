@@ -1,0 +1,42 @@
+{
+  "network": "REGTEST",
+  "lrc20Address": "https://regtest.lrc20.dev.dev.sparkinfra.net:443",
+  "coodinatorIdentifier": "0000000000000000000000000000000000000000000000000000000000000001",
+  "frostSignerAddress": "unix:///tmp/frost_0.sock",
+  "threshold": 2,
+  "signingOperators": {
+    "0000000000000000000000000000000000000000000000000000000000000001": {
+      "id": 0,
+      "identifier": "0000000000000000000000000000000000000000000000000000000000000001",
+      "address": "https://0.spark.dev.dev.sparkinfra.net",
+      "identityPublicKey": "03acd9a5a88db102730ff83dee69d69088cc4c9d93bbee893e90fd5051b7da9651"
+    },
+    "0000000000000000000000000000000000000000000000000000000000000002": {
+      "id": 1,
+      "identifier": "0000000000000000000000000000000000000000000000000000000000000002",
+      "address": "https://1.spark.dev.dev.sparkinfra.net",
+      "identityPublicKey": "02d2d103cacb1d6355efeab27637c74484e2a7459e49110c3fe885210369782e23"
+    },
+    "0000000000000000000000000000000000000000000000000000000000000003": {
+      "id": 2,
+      "identifier": "0000000000000000000000000000000000000000000000000000000000000003",
+      "address": "https://2.spark.dev.dev.sparkinfra.net",
+      "identityPublicKey": "0350f07ffc21bfd59d31e0a7a600e2995273938444447cb9bc4c75b8a895dbb853"
+    }
+  },
+  "tokenTransactionVersion": "V1",
+  "tokenSignatures": "SCHNORR",
+  "useTokenTransactionSchnorrSignatures": true,
+  "electrsUrl": "https://regtest-mempool.dev.dev.sparkinfra.net/api",
+  "expectedWithdrawBondSats": 10000,
+  "expectedWithdrawRelativeBlockLocktime": 1000,
+  "lrc20ApiConfig": {
+    "electrsUrl": "https://regtest-mempool.dev.dev.sparkinfra.net/api",
+    "lrc20NodeUrl": "https://regtest.lrc20.dev.dev.sparkinfra.net",
+    "electrsCredentials": { "username": "spark-sdk", "password": "mCMk1JqlBNtetUNy" }
+  },
+  "sspClientOptions": {
+    "baseUrl": "https://api.dev.dev.sparkinfra.net",
+    "identityPublicKey": "028c094a432d46a0ac95349d792c2e3730bd60c29188db716f56a99e39b95338b4"
+  }
+}

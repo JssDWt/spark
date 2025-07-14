@@ -7,7 +7,7 @@ import {
   SspClientOptions,
 } from "../graphql/client.js";
 import { NetworkType } from "../utils/network.js";
-import { isHermeticTest } from "../tests/isHermeticTest.js";
+import { getIsHermeticTest } from "../tests/isHermeticTest.js";
 
 const SSP_IDENTITY_PUBLIC_KEYS = {
   LOCAL: "028c094a432d46a0ac95349d792c2e3730bd60c29188db716f56a99e39b95338b4",
@@ -52,7 +52,8 @@ export const ELECTRS_CREDENTIALS = {
 export function getElectrsUrl(network: NetworkType): string {
   switch (network) {
     case "LOCAL":
-      return isHermeticTest()
+      const isHermeticTest = getIsHermeticTest();
+      return isHermeticTest
         ? "http://mempool.minikube.local/api"
         : URL_CONFIG.LOCAL.ELECTRS;
     case "REGTEST":
@@ -106,7 +107,8 @@ export function getSspIdentityPublicKey(network: NetworkType): string {
 export function getSspUrl(network: NetworkType): string {
   switch (network) {
     case "LOCAL":
-      return isHermeticTest()
+      const isHermeticTest = getIsHermeticTest();
+      return isHermeticTest
         ? "http://app.minikube.local"
         : URL_CONFIG.LOCAL.SSP;
     case "REGTEST":
@@ -163,10 +165,11 @@ const PROD_PUBKEYS = [
 ];
 
 function getLocalFrostSignerAddress(): string {
-  return isHermeticTest() ? "localhost:9999" : "unix:///tmp/frost_0.sock";
+  const isHermeticTest = getIsHermeticTest();
+  return isHermeticTest ? "localhost:9999" : "unix:///tmp/frost_0.sock";
 }
 
-export const BASE_CONFIG: Required<ConfigOptions> = {
+const BASE_CONFIG: Required<ConfigOptions> = {
   network: "LOCAL",
   lrc20Address: getLrc20Url("LOCAL"),
   coodinatorIdentifier:
@@ -192,23 +195,23 @@ export const BASE_CONFIG: Required<ConfigOptions> = {
   },
 };
 
-export const LOCAL_WALLET_CONFIG: Required<ConfigOptions> = {
+const LOCAL_WALLET_CONFIG: Required<ConfigOptions> = {
   ...BASE_CONFIG,
   threshold: 3,
 };
 
-export const LOCAL_WALLET_CONFIG_SCHNORR: Required<ConfigOptions> = {
+const LOCAL_WALLET_CONFIG_SCHNORR: Required<ConfigOptions> = {
   ...LOCAL_WALLET_CONFIG,
   threshold: 3, // 3 for issuance tests.
 };
 
-export const LOCAL_WALLET_CONFIG_ECDSA: Required<ConfigOptions> = {
+const LOCAL_WALLET_CONFIG_ECDSA: Required<ConfigOptions> = {
   ...LOCAL_WALLET_CONFIG,
   tokenSignatures: "ECDSA",
   threshold: 3, // 3 for issuance tests.
 };
 
-export const REGTEST_WALLET_CONFIG: Required<ConfigOptions> = {
+const REGTEST_WALLET_CONFIG: Required<ConfigOptions> = {
   ...BASE_CONFIG,
   network: "REGTEST",
   lrc20Address: getLrc20Url("REGTEST"),
@@ -227,7 +230,7 @@ export const REGTEST_WALLET_CONFIG: Required<ConfigOptions> = {
   },
 };
 
-export const MAINNET_WALLET_CONFIG: Required<ConfigOptions> = {
+const MAINNET_WALLET_CONFIG: Required<ConfigOptions> = {
   ...BASE_CONFIG,
   network: "MAINNET",
   lrc20Address: getLrc20Url("MAINNET"),
@@ -243,6 +246,14 @@ export const MAINNET_WALLET_CONFIG: Required<ConfigOptions> = {
     baseUrl: getSspUrl("MAINNET"),
     identityPublicKey: getSspIdentityPublicKey("MAINNET"),
   },
+};
+
+export const WalletConfig = {
+  LOCAL: LOCAL_WALLET_CONFIG,
+  LOCAL_SCHNORR: LOCAL_WALLET_CONFIG_SCHNORR,
+  LOCAL_ECDSA: LOCAL_WALLET_CONFIG_ECDSA,
+  REGTEST: REGTEST_WALLET_CONFIG,
+  MAINNET: MAINNET_WALLET_CONFIG,
 };
 
 function getSigningOperators(): Record<string, SigningOperator> {

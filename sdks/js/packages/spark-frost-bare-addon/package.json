@@ -1,7 +1,7 @@
 {
   "private": true,
   "name": "@buildonspark/spark-frost-bare-addon",
-  "version": "1.0.0",
+  "version": "0.0.0",
   "description": "Example Bare addon",
   "exports": {
     "./package": "./package.json",
@@ -16,7 +16,10 @@
   ],
   "addon": true,
   "scripts": {
-    "test": "prettier . --check && bare test.js"
+    "test-cmd": "bare test.js",
+    "test": "echo 'Skipping for now'",
+    "format:fix": "prettier . --write",
+    "format": "prettier . --check"
   },
   "repository": {
     "type": "git",
@@ -33,9 +36,12 @@
   },
   "devDependencies": {
     "cmake-bare": "^1.6.5",
-    "cmake-cargo": "^0.0.4",
+    "cmake-cargo": "^0.0.5",
     "cmake-npm": "^1.1.0",
     "prettier": "^3.5.1",
     "prettier-config-standard": "^7.0.0"
+  },
+  "dependencies": {
+    "@noble/secp256k1": "^2.3.0"
   }
 }

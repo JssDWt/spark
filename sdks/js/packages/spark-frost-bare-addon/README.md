@@ -17,14 +17,19 @@ yarn
 
 cd spark-frost-bare-addon
 
-bare-make generate
+# To build for spark-bare-expo-react-native-app
+bare-make generate --platform ios --arch arm64 --simulator && bare-make build && bare-make install
+# This seems to be necessary to build/install an additional target, otherwise it reuses the previous target:
+rm -rf build
 
-# aarch64-apple-darwin or x86_64-apple-darwin depending on your system
-cargo build --release --target aarch64-apple-darwin
+bare-make generate --platform ios --arch arm64 && bare-make build && bare-make install
+rm -rf build
 
-bare-make build
+bare-make generate --platform ios --arch x64 && bare-make build && bare-make install
+rm -rf build
 
-bare-make install
+# Target the current platform
+bare-make generate && bare-make build && bare-make install
 
 bare index.js
 ```
