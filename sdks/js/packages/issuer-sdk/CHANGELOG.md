@@ -1,5 +1,25 @@
 # @buildonspark/issuer-sdk
 
+## 0.0.77
+
+### Patch Changes
+
+- Upgrades to token transfers
+- Updated dependencies
+  - @buildonspark/lrc20-sdk@0.0.59
+  - @buildonspark/spark-sdk@0.1.46
+
+## 0.0.76
+
+### Patch Changes
+
+- - Update parsing of spark address from fallback_adress to route_hints
+  - Update sdk checks on transactions
+  - Add token features
+  - Improve stability and cleanup
+- Updated dependencies
+  - @buildonspark/spark-sdk@0.1.45
+
 ## 0.0.75
 
 ### Patch Changes

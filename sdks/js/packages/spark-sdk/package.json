@@ -1,6 +1,6 @@
 {
   "name": "@buildonspark/spark-sdk",
-  "version": "0.1.44",
+  "version": "0.1.46",
   "author": "",
   "license": "Apache-2.0",
   "main": "./dist/index.js",
@@ -92,6 +92,14 @@
     "./native": {
       "import": "./dist/native/index.js",
       "require": "./dist/native/index.cjs"
+    },
+    "./native/spark-frost": {
+      "import": "./dist/spark_bindings/native/index.js",
+      "require": "./dist/spark_bindings/native/index.cjs"
+    },
+    "./spark-frost": {
+      "import": "./dist/spark_bindings/wasm/index.js",
+      "require": "./dist/spark_bindings/wasm/index.cjs"
     }
   },
   "browser": {
@@ -149,7 +157,7 @@
   "dependencies": {
     "@bitcoinerlab/secp256k1": "^1.1.1",
     "@bufbuild/protobuf": "^2.2.5",
-    "@buildonspark/lrc20-sdk": "0.0.58",
+    "@buildonspark/lrc20-sdk": "0.0.59",
     "@lightsparkdev/core": "^1.4.2",
     "@noble/curves": "^1.8.0",
     "@noble/hashes": "^1.7.1",
@@ -168,6 +176,7 @@
     "eciesjs": "^0.4.13",
     "eventemitter3": "^5.0.1",
     "js-base64": "^3.7.7",
+    "light-bolt11-decoder": "^3.2.0",
     "nice-grpc": "^2.1.10",
     "nice-grpc-client-middleware-retry": "^3.1.10",
     "nice-grpc-common": "^2.0.2",

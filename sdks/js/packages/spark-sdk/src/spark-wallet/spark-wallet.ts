@@ -43,7 +43,6 @@ import {
   QueryNodesResponse,
   SigningJob,
   SubscribeToEventsResponse,
-  TokenTransactionWithStatus,
   Transfer,
   TransferStatus,
   TransferType,
@@ -102,7 +101,7 @@ import {
   SparkAddressFormat,
 } from "../address/index.js";
 import { isReactNative } from "../constants.js";
-import { networkToJSON, Network as NetworkProto } from "../proto/spark.js";
+import { Network as NetworkProto, networkToJSON } from "../proto/spark.js";
 import {
   decodeInvoice,
   getNetworkFromInvoice,
@@ -127,7 +126,10 @@ import type {
   SparkWalletProps,
   TokenMetadata,
   TransferParams,
+  TokenBalanceMap,
 } from "./types.js";
+import { encodeHumanReadableTokenIdentifier } from "../utils/token-identifier.js";
+import { TokenTransactionWithStatus } from "../proto/spark_token.js";
 
 /**
  * The SparkWallet class is the primary interface for interacting with the Spark network.
@@ -164,6 +166,7 @@ export class SparkWallet extends EventEmitter {
   private streamController: AbortController | null = null;
 
   protected leaves: TreeNode[] = [];
+
   protected tokenOutputs: Map<string, OutputWithPreviousTransactionData[]> =
     new Map();
 
@@ -486,8 +489,7 @@ export class SparkWallet extends EventEmitter {
                 leaf.signingKeyshare.publicKey,
                 operatorLeaf.signingKeyshare.publicKey,
               ) ||
-              !equalBytes(leaf.nodeTx, operatorLeaf.nodeTx) ||
-              !equalBytes(leaf.refundTx, operatorLeaf.refundTx)
+              !equalBytes(leaf.nodeTx, operatorLeaf.nodeTx)
             ) {
               leavesToIgnore.add(nodeId);
             }
@@ -1189,30 +1191,21 @@ export class SparkWallet extends EventEmitter {
    *
    * @returns {Promise<Object>} Object containing:
    *   - balance: The wallet's current balance in satoshis
-   *   - tokenBalances: Map of token public keys to token balances and token info
+   *   - tokenBalances: Map of the human readable token identifier to token balances and token info
    */
   public async getBalance(): Promise<{
     balance: bigint;
-    tokenBalances: Map<
-      string,
-      { balance: bigint; tokenMetadata: TokenMetadata }
-    >;
+    tokenBalances: TokenBalanceMap;
   }> {
     const leaves = await this.getLeaves(true);
     await this.syncTokenOutputs();
 
-    let tokenBalances: Map<
-      string,
-      { balance: bigint; tokenMetadata: TokenMetadata }
-    >;
+    let tokenBalances: TokenBalanceMap;
 
     if (this.tokenOutputs.size !== 0) {
       tokenBalances = await this.getTokenBalance();
     } else {
-      tokenBalances = new Map<
-        string,
-        { balance: bigint; tokenMetadata: TokenMetadata }
-      >();
+      tokenBalances = new Map();
     }
 
     return {
@@ -1221,9 +1214,7 @@ export class SparkWallet extends EventEmitter {
     };
   }
 
-  private async getTokenBalance(): Promise<
-    Map<string, { balance: bigint; tokenMetadata: TokenMetadata }>
-  > {
+  private async getTokenBalance(): Promise<TokenBalanceMap> {
     const sparkTokenClient =
       await this.connectionManager.createSparkTokenClient(
         this.config.getCoordinatorAddress(),
@@ -1232,20 +1223,20 @@ export class SparkWallet extends EventEmitter {
     const tokenMetadata = await sparkTokenClient.query_token_metadata({
       issuerPublicKeys: Array.from(this.tokenOutputs.keys()).map(hexToBytes),
     });
-
-    const result = new Map<
-      string,
-      { balance: bigint; tokenMetadata: TokenMetadata }
-    >();
+    const result: TokenBalanceMap = new Map();
 
     for (const metadata of tokenMetadata.tokenMetadata) {
-      const issuerPublicKey = bytesToHex(metadata.issuerPublicKey);
-      const leaves = this.tokenOutputs.get(issuerPublicKey);
-
-      result.set(issuerPublicKey, {
+      const tokenPublicKey = bytesToHex(metadata.issuerPublicKey);
+      const leaves = this.tokenOutputs.get(tokenPublicKey);
+      const humanReadableTokenIdentifier = encodeHumanReadableTokenIdentifier({
+        tokenIdentifier: metadata.tokenIdentifier,
+        network: this.config.getNetworkType(),
+      });
+      result.set(humanReadableTokenIdentifier, {
         balance: leaves ? calculateAvailableTokenAmount(leaves) : BigInt(0),
         tokenMetadata: {
-          issuerPublicKey,
+          tokenPublicKey,
+          rawTokenIdentifier: metadata.tokenIdentifier,
           tokenName: metadata.tokenName,
           tokenTicker: metadata.tokenTicker,
           decimals: metadata.decimals,
@@ -2594,31 +2585,27 @@ export class SparkWallet extends EventEmitter {
           invoice.invoice.encodedInvoice,
         ).fallbackAddress;
 
-        if (
-          sparkFallbackAddress &&
-          isValidSparkFallback(hexToBytes(sparkFallbackAddress))
-        ) {
-          const invoiceIdentityPubkey = sparkFallbackAddress.slice(6); // remove the 3 byte header
-          const expectedIdentityPubkey =
-            receiverIdentityPubkey ?? (await this.getIdentityPublicKey());
-
-          if (invoiceIdentityPubkey !== expectedIdentityPubkey) {
-            throw new ValidationError(
-              "Mismatch between spark identity embedded in lightning invoice and designated recipient spark identity",
-              {
-                field: "sparkFallbackAddress",
-                value: invoiceIdentityPubkey,
-                expected: expectedIdentityPubkey,
-              },
-            );
-          }
-        } else {
+        if (!sparkFallbackAddress) {
           throw new ValidationError(
-            "No valid spark fallback address found in lightning invoice",
+            "No spark fallback address found in lightning invoice",
             {
               field: "sparkFallbackAddress",
               value: sparkFallbackAddress,
               expected: "Valid spark fallback address",
+            },
+          );
+        }
+
+        const expectedIdentityPubkey =
+          receiverIdentityPubkey ?? (await this.getIdentityPublicKey());
+
+        if (sparkFallbackAddress !== expectedIdentityPubkey) {
+          throw new ValidationError(
+            "Mismatch between spark identity embedded in lightning invoice and designated recipient spark identity",
+            {
+              field: "sparkFallbackAddress",
+              value: sparkFallbackAddress,
+              expected: expectedIdentityPubkey,
             },
           );
         }
@@ -2719,9 +2706,8 @@ export class SparkWallet extends EventEmitter {
           "No valid spark address found in invoice. Defaulting to lightning.",
         );
       } else {
-        const identityPublicKey = sparkFallbackAddress.slice(6); // remove the 3 byte header
         const receiverSparkAddress = encodeSparkAddress({
-          identityPublicKey,
+          identityPublicKey: sparkFallbackAddress,
           network: Network[invoiceNetwork] as NetworkType,
         });
         return await this.transfer({
@@ -3164,8 +3150,15 @@ export class SparkWallet extends EventEmitter {
    * @param {string} id - The ID of the transfer
    * @returns {Promise<Transfer | undefined>} The transfer
    */
-  public async getTransfer(id: string): Promise<Transfer | undefined> {
-    return await this.transferService.queryTransfer(id);
+  public async getTransfer(id: string): Promise<WalletTransfer | undefined> {
+    const transfer = await this.transferService.queryTransfer(id);
+    if (!transfer) {
+      return undefined;
+    }
+    return mapTransferToWalletTransfer(
+      transfer,
+      bytesToHex(await this.config.signer.getIdentityPublicKey()),
+    );
   }
 
   // ***** Token Flow *****
@@ -3180,10 +3173,9 @@ export class SparkWallet extends EventEmitter {
     this.tokenOutputs.clear();
 
     const unsortedTokenOutputs =
-      await this.tokenTransactionService.fetchOwnedTokenOutputs(
-        [await this.config.signer.getIdentityPublicKey()],
-        [],
-      );
+      await this.tokenTransactionService.fetchOwnedTokenOutputs({
+        ownerPublicKeys: [await this.config.signer.getIdentityPublicKey()],
+      });
 
     const filteredTokenOutputs = unsortedTokenOutputs.filter(
       (output) =>
@@ -3314,34 +3306,27 @@ export class SparkWallet extends EventEmitter {
    * Retrieves token transaction history for specified tokens owned by the wallet.
    * Can optionally filter by specific transaction hashes.
    *
-   * @param tokenPublicKeys - Array of token public keys to query transactions for
+   * @param ownerPublicKeys - Optional array of owner public keys to query transactions for
+   * @param issuerPublicKeys - Optional array of issuer public keys to query transactions for
    * @param tokenTransactionHashes - Optional array of specific transaction hashes to filter by
+   * @param tokenIdentifiers - Optional array of token identifiers to filter by
+   * @param outputIds - Optional array of output IDs to filter by
    * @returns Promise resolving to array of token transactions with their current status
    */
   public async queryTokenTransactions(
-    tokenPublicKeys: string[],
+    ownerPublicKeys?: string[],
+    issuerPublicKeys?: string[],
     tokenTransactionHashes?: string[],
+    tokenIdentifiers?: string[],
+    outputIds?: string[],
   ): Promise<TokenTransactionWithStatus[]> {
-    const sparkClient = await this.connectionManager.createSparkClient(
-      this.config.getCoordinatorAddress(),
-    );
-
-    let queryParams;
-    if (tokenTransactionHashes?.length) {
-      queryParams = {
-        tokenPublicKeys: tokenPublicKeys?.map(hexToBytes)!,
-        ownerPublicKeys: [hexToBytes(await this.getIdentityPublicKey())],
-        tokenTransactionHashes: tokenTransactionHashes.map(hexToBytes),
-      };
-    } else {
-      queryParams = {
-        tokenPublicKeys: tokenPublicKeys?.map(hexToBytes)!,
-        ownerPublicKeys: [hexToBytes(await this.getIdentityPublicKey())],
-      };
-    }
-
-    const response = await sparkClient.query_token_transactions(queryParams);
-    return response.tokenTransactionsWithStatus;
+    return this.tokenTransactionService.queryTokenTransactions({
+      ownerPublicKeys,
+      issuerPublicKeys,
+      tokenTransactionHashes,
+      tokenIdentifiers,
+      outputIds,
+    }) as Promise<TokenTransactionWithStatus[]>;
   }
 
   public async getTokenL1Address(): Promise<string> {

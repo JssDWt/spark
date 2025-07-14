@@ -49,7 +49,6 @@ export class IssuerTokenTransactionService extends TokenTransactionService {
         $case: "mintInput",
         mintInput: {
           issuerPublicKey: tokenPublicKey,
-          issuerProvidedTimestamp: Date.now(),
         },
       },
       tokenOutputs: [
@@ -59,10 +58,10 @@ export class IssuerTokenTransactionService extends TokenTransactionService {
           tokenAmount: numberToBytesBE(tokenAmount, 16),
         },
       ],
+      clientCreatedTimestamp: new Date(),
       sparkOperatorIdentityPublicKeys:
         super.collectOperatorIdentityPublicKeys(),
       expiryTime: undefined,
-      clientCreatedTimestamp: new Date(),
     };
   }
 }
