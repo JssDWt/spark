@@ -52,7 +52,6 @@ export const ELECTRS_CREDENTIALS = {
 export function getElectrsUrl(network: NetworkType): string {
   switch (network) {
     case "LOCAL":
-      const isHermeticTest = getIsHermeticTest();
       return isHermeticTest
         ? "http://mempool.minikube.local/api"
         : URL_CONFIG.LOCAL.ELECTRS;
@@ -107,7 +106,6 @@ export function getSspIdentityPublicKey(network: NetworkType): string {
 export function getSspUrl(network: NetworkType): string {
   switch (network) {
     case "LOCAL":
-      const isHermeticTest = getIsHermeticTest();
       return isHermeticTest
         ? "http://app.minikube.local"
         : URL_CONFIG.LOCAL.SSP;
@@ -165,7 +163,6 @@ const PROD_PUBKEYS = [
 ];
 
 function getLocalFrostSignerAddress(): string {
-  const isHermeticTest = getIsHermeticTest();
   return isHermeticTest ? "localhost:9999" : "unix:///tmp/frost_0.sock";
 }
 

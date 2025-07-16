@@ -41,7 +41,7 @@ export type DepositParams = {
  *
  * @example
  * ```typescript
- * const tokenMetadata: TokenMetadata = {
+ * const tokenMetadata: UserTokenMetadata = {
  *   rawTokenIdentifier: new Uint8Array([1, 2, 3]),
  *   tokenPublicKey: "0348fbb...",
  *   tokenName: "SparkToken",
@@ -51,10 +51,10 @@ export type DepositParams = {
  * };
  * ```
  */
-export type TokenMetadata = {
+export type UserTokenMetadata = {
   /** Raw binary token identifier - This is used to encode the human readable token identifier */
   rawTokenIdentifier: Uint8Array;
-  /** Hex-encoded public key of the token issuer - Same as issuerPublicKey */
+  /** Public key of the token issuer - Same as issuerPublicKey */
   tokenPublicKey: string;
   /** Human-readable name of the token (e.g., SparkToken)*/
   tokenName: string;
@@ -70,7 +70,7 @@ export type TokenBalanceMap = Map<
   HumanReadableTokenIdentifier,
   {
     balance: bigint;
-    tokenMetadata: TokenMetadata;
+    tokenMetadata: UserTokenMetadata;
   }
 >;
 
