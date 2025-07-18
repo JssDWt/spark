@@ -1,0 +1,29 @@
+{
+  "name": "matrix-testing",
+  "packageManager": "yarn@4.9.2",
+  "type": "module",
+  "scripts": {
+    "test-cmd": "node --experimental-vm-modules $(yarn bin jest) --no-cache --runInBand --detectOpenHandles --forceExit --verbose --runInBand",
+    "test": "yarn test-cmd src/matrix.test.ts",
+    "dev": "yarn tsx src/matrix.test.ts"
+  },
+  "devDependencies": {
+    "@jest/globals": "^29.7.0",
+    "@types/jest": "^29.5.14",
+    "@types/node": "^22.13.2",
+    "cross-env": "^7.0.3",
+    "jest": "^29.7.0",
+    "prettier": "^3.5.1",
+    "ts-jest": "^29.4.0",
+    "tsx": "^4.20.3",
+    "typescript": "^5.7.3"
+  },
+  "dependencies": {
+    "@buildonspark/lrc20-sdk": "0.0.32",
+    "@buildonspark/spark-sdk": "workspace:^",
+    "@lightsparkdev/core": "^1.3.0",
+    "spark-sdk-29": "npm:@buildonspark/spark-sdk@0.1.29",
+    "spark-sdk-36": "npm:@buildonspark/spark-sdk@0.1.36",
+    "spark-sdk-46": "npm:@buildonspark/spark-sdk@0.1.46"
+  }
+}
