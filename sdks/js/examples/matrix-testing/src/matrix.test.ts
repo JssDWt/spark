@@ -15,12 +15,6 @@ async function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-/**
- * Programmatically loads all SDK versions aliased in package.json.
- * @returns {Promise<SdkVersions>} A promise that resolves to an object
- * where keys are the package aliases (e.g., "spark-sdk-29") and
- * values are the imported SDK modules.
- */
 async function loadSdkVersions(): Promise<SdkVersions> {
   // 1. Read and parse package.json
   const packageJsonPath = path.join(process.cwd(), "package.json");
@@ -47,8 +41,15 @@ async function loadSdkVersions(): Promise<SdkVersions> {
       // Use dynamic import() which returns a Promise
       const module = await import(alias);
 
-      // Handles both default and named exports. Assumes the main export is 'default' if it exists.
-      sdkModules[alias] = module.default || module;
+      console.log(`Initializing version: ${alias}`);
+
+      let { wallet, mnemonic } = await module.SparkWallet.initialize({
+        options: {
+          network: "REGTEST",
+        },
+      });
+      sdkModules[alias] = wallet;
+      await sleep(1000);
     } catch (error) {
       console.error(`Failed to import SDK version: ${alias}`, error);
     }
@@ -56,24 +57,7 @@ async function loadSdkVersions(): Promise<SdkVersions> {
   return sdkModules;
 }
 
-async function createWallets(sdkModules: SdkVersions): Promise<SdkVersions> {
-  const wallets: SdkVersions = {};
-  for (const [version, module] of Object.entries(sdkModules)) {
-    console.log(`Initializing version: ${version}`);
-    let { wallet, mnemonic } = await module.SparkWallet.initialize({
-      options: {
-        network: "REGTEST",
-      },
-    });
-
-    wallets[version] = wallet;
-    await sleep(1000);
-  }
-  return wallets;
-}
-
-let sdkVersions = await loadSdkVersions();
-let wallets = await createWallets(sdkVersions);
+let wallets = await loadSdkVersions();
 
 describe.each(Object.entries(wallets))(
   "Sending sdk version %s",
@@ -99,7 +83,7 @@ describe.each(Object.entries(wallets))(
       async (version: string, currReceiver: any) => {
         if (currSender !== currReceiver) {
           const address = await currReceiver.getSparkAddress();
-          let currBalance:bigint;
+          let currBalance: bigint;
           const transfer = await currSender.transfer({
             amountSats: 1,
             receiverSparkAddress: address,
