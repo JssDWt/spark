@@ -1,8 +1,10 @@
 import { IssuerSparkWallet } from "@buildonspark/issuer-sdk";
 import {
+  Bech32mTokenIdentifier,
   ConfigOptions,
   constructUnilateralExitFeeBumpPackages,
   decodeSparkAddress,
+  encodeBech32mTokenIdentifier,
   encodeSparkAddress,
   getLatestDepositTxId,
   getNetwork,
@@ -11,6 +13,7 @@ import {
   isEphemeralAnchorOutput,
   Network,
   NetworkType,
+  protoToNetwork,
   WalletConfig,
 } from "@buildonspark/spark-sdk";
 import {
@@ -314,6 +317,7 @@ const commands = [
   "gettokenl1address",
   "getissuertokenbalance",
   "getissuertokenmetadata",
+  "getissuertokenidentifier",
   "getissuertokenpublickey",
   "minttokens",
   "burntokens",
@@ -321,6 +325,7 @@ const commands = [
   "unfreezetokens",
   "getissuertokenactivity",
   "announcetoken",
+  "createtoken",
   "nontrustydeposit",
   "querytokentransactions",
   "gettransferfromssp",
@@ -578,12 +583,14 @@ async function runCLI() {
   gettokenl1address                                                   - Get the L1 address for on-chain token operations
   getissuertokenbalance                                               - Get the issuer's token balance
   getissuertokenmetadata                                              - Get the issuer's token metadata
+  getissuertokenidentifier                                            - Get the issuer's token identifier
   getissuertokenpublickey                                             - Get the issuer's token public key
   minttokens <amount>                                                 - Mint new tokens
   burntokens <amount>                                                 - Burn tokens
   freezetokens <sparkAddress>                                         - Freeze tokens for a specific address
   unfreezetokens <sparkAddress>                                       - Unfreeze tokens for a specific address
   announcetoken <tokenName> <tokenTicker> <decimals> <maxSupply> <isFreezable> - Announce token on L1
+  createtoken <tokenName> <tokenTicker> <decimals> <maxSupply> <isFreezable> - Create a new token
 
   help                                                                - Show this help message
   exit/quit                                                           - Exit the program
@@ -867,6 +874,7 @@ async function runCLI() {
             ...config,
             network,
           };
+
           try {
             const { wallet: newWallet, mnemonic: newMnemonic } =
               await IssuerSparkWallet.initialize({
@@ -932,12 +940,10 @@ async function runCLI() {
           if (balanceInfo.tokenBalances && balanceInfo.tokenBalances.size > 0) {
             console.log("\nToken Balances:");
             for (const [
-              humanReadableTokenIdentifier,
+              bech32mTokenIdentifier,
               tokenInfo,
             ] of balanceInfo.tokenBalances.entries()) {
-              console.log(
-                `  Token Identifier (${humanReadableTokenIdentifier}):`,
-              );
+              console.log(`  Token Identifier (${bech32mTokenIdentifier}):`);
               console.log(
                 `    Token Public Key: ${tokenInfo.tokenMetadata.tokenPublicKey}`,
               );
@@ -1131,18 +1137,18 @@ async function runCLI() {
           }
           if (args.length < 3) {
             console.log(
-              "Usage: transfertokens <tokenPubKey> <recieverSparkAddress> <amount>",
+              "Usage: transfertokens <tokenIdentifier> <receiverPubKey> <amount>",
             );
             break;
           }
 
-          const tokenPubKey = args[0];
+          const tokenIdentifier = args[0] as Bech32mTokenIdentifier;
           const tokenReceiverPubKey = args[1];
           const tokenAmount = BigInt(parseInt(args[2]));
 
           try {
             const result = await wallet.transferTokens({
-              tokenPublicKey: tokenPubKey,
+              tokenIdentifier,
               tokenAmount: tokenAmount,
               receiverSparkAddress: tokenReceiverPubKey,
             });
@@ -1167,7 +1173,7 @@ async function runCLI() {
             break;
           }
 
-          const batchTokenPubKey = args[0];
+          const batchTokenIdentifier = args[0] as Bech32mTokenIdentifier;
           let tokenTransfers = [];
 
           for (let i = 1; i < args.length; i++) {
@@ -1188,7 +1194,7 @@ async function runCLI() {
             }
 
             tokenTransfers.push({
-              tokenPublicKey: batchTokenPubKey,
+              tokenIdentifier: batchTokenIdentifier,
               tokenAmount: BigInt(amount),
               receiverSparkAddress: receiverAddress,
             });
@@ -1272,7 +1278,17 @@ async function runCLI() {
             break;
           }
           const balance = await wallet.getIssuerTokenBalance();
+          console.log("Issuer Token Identifier:", balance.tokenIdentifier);
           console.log("Issuer Token Balance:", balance.balance.toString());
+          break;
+        }
+        case "getissuertokenidentifier": {
+          if (!wallet) {
+            console.log("Please initialize a wallet first");
+            break;
+          }
+          const tokenIdentifier = await wallet.getIssuerTokenIdentifier();
+          console.log("Issuer Token Identifier:", tokenIdentifier);
           break;
         }
         case "getissuertokenmetadata": {
@@ -1345,6 +1361,23 @@ async function runCLI() {
           });
           break;
         }
+        case "createtoken": {
+          if (!wallet) {
+            console.log("Please initialize a wallet first");
+            break;
+          }
+          const [tokenName, tokenTicker, decimals, maxSupply, isFreezable] =
+            args;
+          const result = await wallet.createToken({
+            tokenName,
+            tokenTicker,
+            decimals: parseInt(decimals),
+            maxSupply: BigInt(maxSupply),
+            isFreezable: isFreezable.toLowerCase() === "true",
+          });
+          console.log("Create Token Transaction ID:", result);
+          break;
+        }
         case "announcetoken": {
           if (!wallet) {
             console.log("Please initialize a wallet first");
@@ -1384,25 +1417,29 @@ async function runCLI() {
             ownerPublicKeys.push(await wallet.getIdentityPublicKey());
           }
 
-          let issuerPublicKeys = parsedArgs.issuerPublicKeys || [];
+          let issuerPublicKeys: string[] = parsedArgs.issuerPublicKeys || [];
           if (parsedArgs.useWalletIdentityKeyForIssuer) {
             issuerPublicKeys.push(await wallet.getIdentityPublicKey());
           }
 
-          const transactions = await wallet.queryTokenTransactions(
+          const transactions = await wallet.queryTokenTransactions({
             ownerPublicKeys,
             issuerPublicKeys,
-            parsedArgs.tokenTransactionHashes,
-            parsedArgs.tokenIdentifiers,
-            parsedArgs.outputIds,
-          );
+            tokenTransactionHashes: parsedArgs.tokenTransactionHashes,
+            tokenIdentifiers: parsedArgs.tokenIdentifiers,
+            outputIds: parsedArgs.outputIds,
+          });
 
           console.log("\nToken Transactions:");
           for (const tx of transactions) {
             console.log("\nTransaction Details:");
             console.log(`  Status: ${TokenTransactionStatus[tx.status]}`);
-            var tokenIdentifier = "";
-            var issuerPublicKey = "";
+            let tokenIdentifier = "";
+            let issuerPublicKey = "";
+            const protoNetwork = tx.tokenTransaction?.network;
+            const network = protoNetwork
+              ? protoToNetwork(protoNetwork)
+              : undefined;
             if (tx.tokenTransaction?.tokenInputs?.$case === "createInput") {
               issuerPublicKey = hex.encode(
                 tx.tokenTransaction?.tokenInputs.createInput.issuerPublicKey,
@@ -1412,8 +1449,20 @@ async function runCLI() {
                 tx.tokenTransaction?.tokenOutputs[0].tokenPublicKey ||
                   new Uint8Array(0),
               );
+              tokenIdentifier = bytesToHex(
+                tx.tokenTransaction?.tokenOutputs[0]?.tokenIdentifier ||
+                  new Uint8Array(0),
+              );
             }
-            console.log(`  Token Identifier: ${tokenIdentifier}`);
+            console.log(`  Raw Token Identifier: ${tokenIdentifier}`);
+            console.log(
+              tokenIdentifier && network !== undefined
+                ? `  Bech32m Token Identifier: ${encodeBech32mTokenIdentifier({
+                    tokenIdentifier: hexToBytes(tokenIdentifier),
+                    network: Network[network] as NetworkType,
+                  })}`
+                : "",
+            );
             console.log(`  Issuer Public Key: ${issuerPublicKey}`);
 
             if (tx.tokenTransaction?.tokenInputs) {
@@ -1450,6 +1499,14 @@ async function runCLI() {
                 console.log(`    Output ID: ${output.id}`);
                 console.log(
                   `    Owner Public Key: ${hex.encode(output.ownerPublicKey)}`,
+                );
+                console.log(
+                  output.ownerPublicKey && network !== undefined
+                    ? `    Owner Spark Address: ${encodeSparkAddress({
+                        identityPublicKey: bytesToHex(output.ownerPublicKey),
+                        network: Network[network] as NetworkType,
+                      })}`
+                    : "",
                 );
                 console.log(
                   `    Token Amount: 0x${hex.encode(output.tokenAmount)} (decimal: ${bytesToNumberBE(output.tokenAmount)})`,

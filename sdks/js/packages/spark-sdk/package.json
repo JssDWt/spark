@@ -1,6 +1,6 @@
 {
   "name": "@buildonspark/spark-sdk",
-  "version": "0.1.46",
+  "version": "0.2.3",
   "author": "",
   "license": "Apache-2.0",
   "main": "./dist/index.js",
@@ -48,6 +48,10 @@
     "./test-utils": {
       "import": "./dist/tests/test-utils.js",
       "require": "./dist/tests/test-utils.cjs"
+    },
+    "./debug": {
+      "import": "./dist/debug.js",
+      "require": "./dist/debug.cjs"
     },
     "./proto/spark": {
       "import": "./dist/proto/spark.js",
@@ -134,7 +138,7 @@
   "dependencies": {
     "@bitcoinerlab/secp256k1": "^1.1.1",
     "@bufbuild/protobuf": "^2.2.5",
-    "@buildonspark/lrc20-sdk": "0.0.59",
+    "@buildonspark/lrc20-sdk": "0.0.60",
     "@buildonspark/spark-frost-bare-addon": "0.0.0",
     "@lightsparkdev/core": "^1.4.3",
     "@noble/curves": "^1.8.0",

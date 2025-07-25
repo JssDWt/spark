@@ -1,5 +1,54 @@
 # @buildonspark/spark-sdk
 
+## 0.2.3
+
+### Patch Changes
+
+- -leaf key improvements
+  -token improvements
+
+## 0.2.2
+
+### Patch Changes
+
+- Export stateless signer from signer.ts
+
+## 0.2.1
+
+### Patch Changes
+
+- tokens changes
+  - Bech32mTokenIdentifier prefix change from "btk" -> "btkn"
+
+- Updated dependencies
+  - @buildonspark/lrc20-sdk@0.0.60
+
+## 0.2.0
+
+### Minor Changes
+
+- Remove key map state from signer interface.
+  - The SDK now passes around the derivation details regarding the signing key instead of forcing the signer to maintain a pubkey to privkey map
+- Parameter changes to transferTokens() and batchTransferTokens()
+- Parameter changes to queryTokenTransactions()
+- Replaced getIssuerTokenInfo() with getIssuerTokenMetadata()
+- Rename HumanReadableTokenIdentifier to Bech32mTokenIdentifier
+  - Bech32mTokenIdentifier must now be passed as tokenIdentifier in transferTokens() batchTransferTokens
+
+## 0.1.47
+
+### Patch Changes
+
+- - Move some less common imports to root. If you were using these import paths please update them to import the same objects from @buildonspark/spark-sdk instead:
+    - @buildonspark/spark-sdk/address
+    - @buildonspark/spark-sdk/signer
+    - @buildonspark/spark-sdk/services/wallet-config
+    - @buildonspark/spark-sdk/utils
+    - @buildonspark/spark-sdk/token-transactions
+    - @buildonspark/spark-sdk/config
+    - @buildonspark/spark-sdk/lrc-connection
+    - @buildonspark/spark-sdk/connection
+
 ## 0.1.46
 
 ### Patch Changes

@@ -12,6 +12,7 @@ import {
   GenerateDepositAddressResponse,
   StartDepositTreeCreationResponse,
 } from "../proto/spark.js";
+import { KeyDerivation } from "../signer/types.js";
 import {
   getP2TRAddressFromPublicKey,
   getSigHashFromTx,
@@ -20,10 +21,7 @@ import {
 import { subtractPublicKeys } from "../utils/keys.js";
 import { getNetwork } from "../utils/network.js";
 import { proofOfPossessionMessageHashForDepositAddress } from "../utils/proof.js";
-import {
-  DEFAULT_FEE_SATS,
-  getEphemeralAnchorOutput,
-} from "../utils/transaction.js";
+import { getEphemeralAnchorOutput } from "../utils/transaction.js";
 import { WalletConfigService } from "./config.js";
 import { ConnectionManager } from "./connection.js";
 
@@ -39,7 +37,7 @@ export type GenerateDepositAddressParams = {
 };
 
 export type CreateTreeRootParams = {
-  signingPubKey: Uint8Array;
+  keyDerivation: KeyDerivation;
   verifyingKey: Uint8Array;
   depositTx: Transaction;
   vout: number;
@@ -182,7 +180,7 @@ export class DepositService {
   }
 
   async createTreeRoot({
-    signingPubKey,
+    keyDerivation,
     verifyingKey,
     depositTx,
     vout,
@@ -242,6 +240,9 @@ export class DepositService {
       sequence,
     });
 
+    const signingPubKey =
+      await this.config.signer.getPublicKeyFromDerivation(keyDerivation);
+
     const refundP2trAddress = getP2TRAddressFromPublicKey(
       signingPubKey,
       this.config.getNetwork(),
@@ -279,12 +280,12 @@ export class DepositService {
         rootTxSigningJob: {
           rawTx: rootTx.toBytes(),
           signingPublicKey: signingPubKey,
-          signingNonceCommitment: rootNonceCommitment,
+          signingNonceCommitment: rootNonceCommitment.commitment,
         },
         refundTxSigningJob: {
           rawTx: refundTx.toBytes(),
           signingPublicKey: signingPubKey,
-          signingNonceCommitment: refundNonceCommitment,
+          signingNonceCommitment: refundNonceCommitment.commitment,
         },
       });
     } catch (error) {
@@ -346,7 +347,7 @@ export class DepositService {
     const rootSignature = await this.config.signer.signFrost({
       message: rootTxSighash,
       publicKey: signingPubKey,
-      privateAsPubKey: signingPubKey,
+      keyDerivation,
       verifyingKey,
       selfCommitment: rootNonceCommitment,
       statechainCommitments:
@@ -358,7 +359,7 @@ export class DepositService {
     const refundSignature = await this.config.signer.signFrost({
       message: refundTxSighash,
       publicKey: signingPubKey,
-      privateAsPubKey: signingPubKey,
+      keyDerivation,
       verifyingKey,
       selfCommitment: refundNonceCommitment,
       statechainCommitments:

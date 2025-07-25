@@ -1,4 +1,4 @@
-import { isNode } from "@lightsparkdev/core";
+import { isError, isNode } from "@lightsparkdev/core";
 import { sha256 } from "@noble/hashes/sha2";
 import type { Channel, ClientFactory } from "nice-grpc";
 import { retryMiddleware } from "nice-grpc-client-middleware-retry";
@@ -7,7 +7,7 @@ import type {
   Channel as ChannelWeb,
   ClientFactory as ClientFactoryWeb,
 } from "nice-grpc-web";
-import { isBun, isReactNative, clientEnv } from "../constants.js";
+import { clientEnv, isBun, isReactNative } from "../constants.js";
 import { AuthenticationError, NetworkError } from "../errors/types.js";
 import { MockServiceClient, MockServiceDefinition } from "../proto/mock.js";
 import { SparkServiceClient, SparkServiceDefinition } from "../proto/spark.js";
@@ -16,12 +16,16 @@ import {
   SparkAuthnServiceClient,
   SparkAuthnServiceDefinition,
 } from "../proto/spark_authn.js";
-import { RetryOptions, SparkCallOptions } from "../types/grpc.js";
-import { WalletConfigService } from "./config.js";
 import {
   SparkTokenServiceClient,
   SparkTokenServiceDefinition,
 } from "../proto/spark_token.js";
+import { RetryOptions, SparkCallOptions } from "../types/grpc.js";
+import { WalletConfigService } from "./config.js";
+
+type SparkAuthnServiceClientWithClose = SparkAuthnServiceClient & {
+  close?: () => void;
+};
 
 export class ConnectionManager {
   private config: WalletConfigService;
@@ -51,6 +55,9 @@ export class ConnectionManager {
       channel: Channel | ChannelWeb;
     }
   > = new Map();
+
+  // Tracks in-flight authenticate() promises so concurrent callers share one
+  private authPromises: Map<string, Promise<string>> = new Map();
 
   constructor(config: WalletConfigService) {
     this.config = config;
@@ -231,57 +238,105 @@ export class ConnectionManager {
   }
 
   private async authenticate(address: string, certPath?: string) {
-    try {
-      const identityPublicKey = await this.config.signer.getIdentityPublicKey();
-      const sparkAuthnClient = await this.createSparkAuthnGrpcConnection(
-        address,
-        certPath,
-      );
+    const existing = this.authPromises.get(address);
+    if (existing) {
+      return existing;
+    }
 
-      const challengeResp = await sparkAuthnClient.get_challenge({
-        publicKey: identityPublicKey,
-      });
+    const authPromise = (async () => {
+      const MAX_ATTEMPTS = 3;
+      let lastError: Error | undefined;
 
-      if (!challengeResp.protectedChallenge?.challenge) {
-        throw new AuthenticationError("Invalid challenge response", {
-          endpoint: "get_challenge",
-          reason: "Missing challenge in response",
-        });
+      /* React Native can cause some outgoing requests to be paused which can result
+         in challenges expiring, so we'll retry any authentication failures: */
+      for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
+        let sparkAuthnClient: SparkAuthnServiceClientWithClose | undefined;
+        try {
+          const identityPublicKey =
+            await this.config.signer.getIdentityPublicKey();
+          sparkAuthnClient = await this.createSparkAuthnGrpcConnection(
+            address,
+            certPath,
+          );
+
+          const challengeResp = await sparkAuthnClient.get_challenge({
+            publicKey: identityPublicKey,
+          });
+
+          if (!challengeResp.protectedChallenge?.challenge) {
+            throw new AuthenticationError("Invalid challenge response", {
+              endpoint: "get_challenge",
+              reason: "Missing challenge in response",
+            });
+          }
+
+          const challengeBytes = Challenge.encode(
+            challengeResp.protectedChallenge.challenge,
+          ).finish();
+          const hash = sha256(challengeBytes);
+
+          const derSignatureBytes =
+            await this.config.signer.signMessageWithIdentityKey(hash);
+
+          const verifyResp = await sparkAuthnClient.verify_challenge({
+            protectedChallenge: challengeResp.protectedChallenge,
+            signature: derSignatureBytes,
+            publicKey: identityPublicKey,
+          });
+
+          sparkAuthnClient.close?.();
+          return verifyResp.sessionToken;
+        } catch (error: unknown) {
+          if (isError(error)) {
+            sparkAuthnClient?.close?.();
+
+            if (error.message.includes("challenge expired")) {
+              console.warn(
+                `Authentication attempt ${attempt + 1} failed due to expired challenge, retrying...`,
+              );
+              lastError = error;
+              continue;
+            }
+
+            throw new AuthenticationError(
+              "Authentication failed",
+              {
+                endpoint: "authenticate",
+                reason: error.message,
+              },
+              error,
+            );
+          } else {
+            lastError = new Error(
+              `Unknown error during authentication: ${String(error)}`,
+            );
+          }
+        }
       }
 
-      const challengeBytes = Challenge.encode(
-        challengeResp.protectedChallenge.challenge,
-      ).finish();
-      const hash = sha256(challengeBytes);
-
-      const derSignatureBytes =
-        await this.config.signer.signMessageWithIdentityKey(hash);
-
-      const verifyResp = await sparkAuthnClient.verify_challenge({
-        protectedChallenge: challengeResp.protectedChallenge,
-        signature: derSignatureBytes,
-        publicKey: identityPublicKey,
-      });
-
-      sparkAuthnClient.close?.();
-      return verifyResp.sessionToken;
-    } catch (error: any) {
-      console.error("Authentication error:", error);
       throw new AuthenticationError(
-        "Authentication failed",
+        "Authentication failed after retrying expired challenges",
         {
           endpoint: "authenticate",
-          reason: error.message,
+          reason: lastError?.message ?? "Unknown error",
         },
-        error,
+        lastError,
       );
+    })();
+
+    this.authPromises.set(address, authPromise);
+
+    try {
+      return await authPromise;
+    } finally {
+      this.authPromises.delete(address);
     }
   }
 
   private async createSparkAuthnGrpcConnection(
     address: string,
     certPath?: string,
-  ): Promise<SparkAuthnServiceClient & { close?: () => void }> {
+  ): Promise<SparkAuthnServiceClientWithClose> {
     const channel = await this.createChannelWithTLS(address, certPath);
     const authnMiddleware = this.createAuthnMiddleware();
     return this.createGrpcClient<SparkAuthnServiceClient>(
@@ -335,6 +390,32 @@ export class ConnectionManager {
     }
   }
 
+  private async *handleMiddlewareError(
+    error: unknown,
+    address: string,
+    call: ClientMiddlewareCall<any, any>,
+    metadata: Metadata,
+    options: SparkCallOptions,
+  ) {
+    if (isError(error)) {
+      if (error.message.includes("token has expired")) {
+        const newAuthToken = await this.authenticate(address);
+        const clientData = this.clients.get(address);
+        if (!clientData) {
+          throw new Error(`No client found for address: ${address}`);
+        }
+        clientData.authToken = newAuthToken;
+
+        return yield* call.next(call.request, {
+          ...options,
+          metadata: metadata.set("Authorization", `Bearer ${newAuthToken}`),
+        });
+      }
+    }
+
+    throw error;
+  }
+
   private createNodeMiddleware(address: string, initialAuthToken: string) {
     return async function* (
       this: ConnectionManager,
@@ -353,21 +434,14 @@ export class ConnectionManager {
             `Bearer ${this.clients.get(address)?.authToken || initialAuthToken}`,
           ),
         });
-      } catch (error: any) {
-        if (error.message?.includes("token has expired")) {
-          const newAuthToken = await this.authenticate(address);
-          const clientData = this.clients.get(address);
-          if (!clientData) {
-            throw new Error(`No client found for address: ${address}`);
-          }
-          clientData.authToken = newAuthToken;
-
-          return yield* call.next(call.request, {
-            ...options,
-            metadata: metadata.set("Authorization", `Bearer ${newAuthToken}`),
-          });
-        }
-        throw error;
+      } catch (error: unknown) {
+        return yield* this.handleMiddlewareError(
+          error,
+          address,
+          call,
+          metadata,
+          options,
+        );
       }
     }.bind(this);
   }
@@ -393,20 +467,13 @@ export class ConnectionManager {
           ),
         });
       } catch (error: any) {
-        if (error.message?.includes("token has expired")) {
-          const newAuthToken = await this.authenticate(address);
-          const clientData = this.clients.get(address);
-          if (!clientData) {
-            throw new Error(`No client found for address: ${address}`);
-          }
-          clientData.authToken = newAuthToken;
-
-          return yield* call.next(call.request, {
-            ...options,
-            metadata: metadata.set("Authorization", `Bearer ${newAuthToken}`),
-          });
-        }
-        throw error;
+        return yield* this.handleMiddlewareError(
+          error,
+          address,
+          call,
+          metadata,
+          options,
+        );
       }
     }.bind(this);
   }

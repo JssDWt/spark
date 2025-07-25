@@ -93,14 +93,9 @@ import { getNextTransactionSequence } from "../utils/transaction.js";
 import { LRCWallet } from "@buildonspark/lrc20-sdk";
 import { sha256 } from "@noble/hashes/sha2";
 import { EventEmitter } from "eventemitter3";
-import {
-  decodeSparkAddress,
-  encodeSparkAddress,
-  isValidPublicKey,
-  SparkAddressFormat,
-} from "../utils/address.js";
 import { isReactNative } from "../constants.js";
 import { Network as NetworkProto, networkToJSON } from "../proto/spark.js";
+import { TokenTransactionWithStatus } from "../proto/spark_token.js";
 import {
   decodeInvoice,
   getNetworkFromInvoice,
@@ -108,6 +103,7 @@ import {
 } from "../services/bolt11-spark.js";
 import { SigningService } from "../services/signing.js";
 import { SparkSigner } from "../signer/signer.js";
+import { KeyDerivation, KeyDerivationType } from "../signer/types.js";
 import { BitcoinFaucet } from "../tests/utils/test-faucet.js";
 import {
   mapTransferToWalletTransfer,
@@ -115,23 +111,31 @@ import {
   WalletLeaf,
   WalletTransfer,
 } from "../types/sdk-types.js";
+import {
+  decodeSparkAddress,
+  encodeSparkAddress,
+  isValidPublicKey,
+  SparkAddressFormat,
+} from "../utils/address.js";
 import { chunkArray } from "../utils/chunkArray.js";
 import { addPublicKeys } from "../utils/keys.js";
+import {
+  Bech32mTokenIdentifier,
+  decodeBech32mTokenIdentifier,
+  encodeBech32mTokenIdentifier,
+} from "../utils/token-identifier.js";
 import type {
   CreateLightningInvoiceParams,
   DepositParams,
   InitWalletResponse,
   PayLightningInvoiceParams,
   SparkWalletProps,
-  UserTokenMetadata,
-  TransferParams,
   TokenBalanceMap,
+  TokenMetadataMap,
+  TokenOutputsMap,
+  TransferParams,
+  UserTokenMetadata,
 } from "./types.js";
-import { encodeHumanReadableTokenIdentifier } from "../utils/token-identifier.js";
-import {
-  TokenTransactionWithStatus,
-  TokenMetadata,
-} from "../proto/spark_token.js";
 
 /**
  * The SparkWallet class is the primary interface for interacting with the Spark network.
@@ -168,9 +172,8 @@ export class SparkWallet extends EventEmitter {
 
   protected leaves: TreeNode[] = [];
 
-  protected tokenOutputs: Map<string, OutputWithPreviousTransactionData[]> =
-    new Map();
-  protected tokenMetadata: Map<string, TokenMetadata> = new Map();
+  protected tokenMetadata: TokenMetadataMap = new Map();
+  protected tokenOutputs: TokenOutputsMap = new Map();
 
   // Add this property near the top of the class with other private properties
   private claimTransfersInterval: NodeJS.Timeout | null = null;
@@ -279,15 +282,12 @@ export class SparkWallet extends EventEmitter {
         }
       } else if (event?.$case === "deposit" && event.deposit.deposit) {
         const deposit = event.deposit.deposit;
-        const signingKey = await this.config.signer.generatePublicKey(
-          sha256(deposit.id),
-        );
 
-        const newLeaf = await this.transferService.extendTimelock(
-          deposit,
-          signingKey,
-        );
-        await this.transferLeavesToSelf(newLeaf.nodes, signingKey);
+        const newLeaf = await this.transferService.extendTimelock(deposit);
+        await this.transferLeavesToSelf(newLeaf.nodes, {
+          type: KeyDerivationType.LEAF,
+          path: deposit.id,
+        });
         this.emit(
           "deposit:confirmed",
           deposit.id,
@@ -439,37 +439,43 @@ export class SparkWallet extends EventEmitter {
   }
 
   public async getLeaves(isBalanceCheck: boolean = false): Promise<TreeNode[]> {
-    const leaves = await this.queryNodes({
-      source: {
-        $case: "ownerIdentityPubkey",
-        ownerIdentityPubkey: await this.config.signer.getIdentityPublicKey(),
-      },
-      includeParents: false,
-      network: NetworkToProto[this.config.getNetwork()],
-    });
+    const operatorToLeaves = new Map<string, QueryNodesResponse>();
+    const ownerIdentityPubkey = await this.config.signer.getIdentityPublicKey();
 
-    const leavesToIgnore: Set<string> = new Set();
-    // Query the leaf states from other operators.
-    // We'll ignore the leaves that are out of sync for now.
-    // Still include the leaves that are out of sync for balance check.
-    if (!isBalanceCheck) {
-      for (const [id, operator] of Object.entries(
-        this.config.getSigningOperators(),
-      )) {
-        if (id !== this.config.getCoordinatorIdentifier()) {
-          const operatorLeaves = await this.queryNodes(
-            {
-              source: {
-                $case: "ownerIdentityPubkey",
-                ownerIdentityPubkey:
-                  await this.config.signer.getIdentityPublicKey(),
-              },
-              includeParents: false,
-              network: NetworkToProto[this.config.getNetwork()],
+    let signingOperators = Object.entries(this.config.getSigningOperators());
+    if (isBalanceCheck) {
+      // If we're just checking the balance, we can just query the coordinator.
+      signingOperators = signingOperators.filter(
+        ([id, _]) => id === this.config.getCoordinatorIdentifier(),
+      );
+    }
+    await Promise.all(
+      signingOperators.map(async ([id, operator]) => {
+        const leaves = await this.queryNodes(
+          {
+            source: {
+              $case: "ownerIdentityPubkey",
+              ownerIdentityPubkey,
             },
-            operator.address,
-          );
+            includeParents: false,
+            network: NetworkToProto[this.config.getNetwork()],
+          },
+          operator.address,
+        );
+        operatorToLeaves.set(id, leaves);
+      }),
+    );
 
+    const leaves = operatorToLeaves.get(
+      this.config.getCoordinatorIdentifier(),
+    )!;
+    const leavesToIgnore: Set<string> = new Set();
+    if (!isBalanceCheck) {
+      // Query the leaf states from other operators.
+      // We'll ignore the leaves that are out of sync for now.
+      // Still include the leaves that are out of sync for balance check.
+      for (const [id, operatorLeaves] of operatorToLeaves) {
+        if (id !== this.config.getCoordinatorIdentifier()) {
           // Loop over leaves returned by coordinator.
           // If the leaf is not present in the operator's leaves, we'll ignore it.
           // If the leaf is present, we'll check if the leaf is in sync with the operator's leaf.
@@ -499,18 +505,34 @@ export class SparkWallet extends EventEmitter {
       }
     }
 
-    const verifyKey = (
-      pubkey1: Uint8Array,
-      pubkey2: Uint8Array,
-      verifyingKey: Uint8Array,
-    ) => {
-      return equalBytes(addPublicKeys(pubkey1, pubkey2), verifyingKey);
-    };
+    const availableLeaves = Object.entries(leaves.nodes).filter(
+      ([_, node]) => node.status === "AVAILABLE",
+    );
 
-    for (const [id, leaf] of Object.entries(leaves.nodes)) {
+    for (const [id, leaf] of availableLeaves) {
       if (
-        !verifyKey(
-          await this.config.signer.generatePublicKey(sha256(leaf.id)),
+        leaf.parentNodeId &&
+        leaf.status === "AVAILABLE" &&
+        this.verifyKey(
+          await this.config.signer.getPublicKeyFromDerivation({
+            type: KeyDerivationType.LEAF,
+            path: leaf.parentNodeId,
+          }),
+          leaf.signingKeyshare?.publicKey ?? new Uint8Array(),
+          leaf.verifyingPublicKey,
+        )
+      ) {
+        this.transferLeavesToSelf([leaf], {
+          type: KeyDerivationType.LEAF,
+          path: leaf.parentNodeId,
+        });
+        leavesToIgnore.add(id);
+      } else if (
+        !this.verifyKey(
+          await this.config.signer.getPublicKeyFromDerivation({
+            type: KeyDerivationType.LEAF,
+            path: leaf.id,
+          }),
           leaf.signingKeyshare?.publicKey ?? new Uint8Array(),
           leaf.verifyingPublicKey,
         )
@@ -519,12 +541,31 @@ export class SparkWallet extends EventEmitter {
       }
     }
 
-    return Object.entries(leaves.nodes)
-      .filter(
-        ([_, node]) =>
-          node.status === "AVAILABLE" && !leavesToIgnore.has(node.id),
-      )
+    return availableLeaves
+      .filter(([_, node]) => !leavesToIgnore.has(node.id))
       .map(([_, node]) => node);
+  }
+
+  private async checkExtendLeaves(leaves: TreeNode[]): Promise<void> {
+    await this.withLeaves(async () => {
+      for (const leaf of leaves) {
+        if (!leaf.parentNodeId && leaf.status === "AVAILABLE") {
+          const res = await this.transferService.extendTimelock(leaf);
+          await this.transferLeavesToSelf(res.nodes, {
+            type: KeyDerivationType.LEAF,
+            path: leaf.id,
+          });
+        }
+      }
+    });
+  }
+
+  private verifyKey(
+    pubkey1: Uint8Array,
+    pubkey2: Uint8Array,
+    verifyingKey: Uint8Array,
+  ): boolean {
+    return equalBytes(addPublicKeys(pubkey1, pubkey2), verifyingKey);
   }
 
   private async selectLeaves(
@@ -697,12 +738,13 @@ export class SparkWallet extends EventEmitter {
     await this.syncTokenOutputs();
 
     let leaves = await this.getLeaves();
-    await this.config.signer.restoreSigningKeysFromLeafs(leaves);
 
     leaves = await this.checkRefreshTimelockNodes(leaves);
     leaves = await this.checkExtendTimeLockNodes(leaves);
 
     this.leaves = leaves;
+    this.checkExtendLeaves(leaves);
+
     this.optimizeLeaves().catch((e) => {
       console.error("Failed to optimize leaves", e);
     });
@@ -985,13 +1027,16 @@ export class SparkWallet extends EventEmitter {
     leavesBatch: TreeNode[],
     targetAmounts?: number[],
   ): Promise<TreeNode[]> {
-    const leafKeyTweaks = await Promise.all(
+    const leafKeyTweaks: LeafKeyTweak[] = await Promise.all(
       leavesBatch.map(async (leaf) => ({
         leaf,
-        signingPubKey: await this.config.signer.generatePublicKey(
-          sha256(leaf.id),
-        ),
-        newSigningPubKey: await this.config.signer.generatePublicKey(),
+        keyDerivation: {
+          type: KeyDerivationType.LEAF,
+          path: leaf.id,
+        },
+        newKeyDerivation: {
+          type: KeyDerivationType.RANDOM,
+        },
       })),
     );
 
@@ -1192,7 +1237,7 @@ export class SparkWallet extends EventEmitter {
    *
    * @returns {Promise<Object>} Object containing:
    *   - balance: The wallet's current balance in satoshis
-   *   - tokenBalances: Map of the human readable token identifier to token balances and token info
+   *   - tokenBalances: Map of the bech32m encodedtoken identifier to token balances and token info
    */
   public async getBalance(): Promise<{
     balance: bigint;
@@ -1215,11 +1260,13 @@ export class SparkWallet extends EventEmitter {
     };
   }
 
-  private async getTokenMetadata(): Promise<Map<string, UserTokenMetadata>> {
-    let metadataToFetch = new Array<string>();
-    for (const issuerPublicKey of this.tokenOutputs.keys()) {
-      if (!this.tokenMetadata.has(issuerPublicKey)) {
-        metadataToFetch.push(issuerPublicKey);
+  private async getTokenMetadata(): Promise<
+    Map<Bech32mTokenIdentifier, UserTokenMetadata>
+  > {
+    let metadataToFetch = new Array<Bech32mTokenIdentifier>();
+    for (const tokenIdentifier of this.tokenOutputs.keys()) {
+      if (!this.tokenMetadata.has(tokenIdentifier)) {
+        metadataToFetch.push(tokenIdentifier);
       }
     }
 
@@ -1231,14 +1278,22 @@ export class SparkWallet extends EventEmitter {
 
       try {
         const response = await sparkTokenClient.query_token_metadata({
-          issuerPublicKeys: metadataToFetch.map(hexToBytes),
+          tokenIdentifiers: metadataToFetch.map(
+            (tokenIdentifier) =>
+              decodeBech32mTokenIdentifier(
+                tokenIdentifier,
+                this.config.getNetworkType(),
+              ).tokenIdentifier,
+          ),
         });
 
-        for (const metadata of response.tokenMetadata) {
-          this.tokenMetadata.set(
-            bytesToHex(metadata.issuerPublicKey),
-            metadata,
-          );
+        for (const tokenMetadata of response.tokenMetadata) {
+          const tokenIdentifier = encodeBech32mTokenIdentifier({
+            tokenIdentifier: tokenMetadata.tokenIdentifier,
+            network: this.config.getNetworkType(),
+          });
+
+          this.tokenMetadata.set(tokenIdentifier, tokenMetadata);
         }
       } catch (error) {
         throw new NetworkError("Failed to fetch token metadata", {
@@ -1248,10 +1303,10 @@ export class SparkWallet extends EventEmitter {
       }
     }
 
-    let tokenMetadataMap = new Map<string, UserTokenMetadata>();
+    let tokenMetadataMap = new Map<Bech32mTokenIdentifier, UserTokenMetadata>();
 
-    for (const [issuerPublicKey, metadata] of this.tokenMetadata) {
-      tokenMetadataMap.set(issuerPublicKey, {
+    for (const [tokenIdentifier, metadata] of this.tokenMetadata) {
+      tokenMetadataMap.set(tokenIdentifier, {
         tokenPublicKey: bytesToHex(metadata.issuerPublicKey),
         rawTokenIdentifier: metadata.tokenIdentifier,
         tokenName: metadata.tokenName,
@@ -1268,10 +1323,10 @@ export class SparkWallet extends EventEmitter {
     const tokenMetadataMap = await this.getTokenMetadata();
 
     const result: TokenBalanceMap = new Map();
-    for (const [issuerPublicKey, tokenMetadata] of tokenMetadataMap) {
-      const outputs = this.tokenOutputs.get(issuerPublicKey);
+    for (const [tokenIdentifier, tokenMetadata] of tokenMetadataMap) {
+      const outputs = this.tokenOutputs.get(tokenIdentifier);
 
-      const humanReadableTokenIdentifier = encodeHumanReadableTokenIdentifier({
+      const humanReadableTokenIdentifier = encodeBech32mTokenIdentifier({
         tokenIdentifier: tokenMetadata.rawTokenIdentifier,
         network: this.config.getNetworkType(),
       });
@@ -1340,11 +1395,12 @@ export class SparkWallet extends EventEmitter {
     let signingPubkey: Uint8Array;
     if (isStatic) {
       // TODO: Add support for multiple static deposit addresses
-      signingPubkey = await this.config.signer.generateStaticDepositKey(0);
+      signingPubkey = await this.config.signer.getStaticDepositSigningKey(0);
     } else {
-      signingPubkey = await this.config.signer.generatePublicKey(
-        sha256(leafId),
-      );
+      signingPubkey = await this.config.signer.getPublicKeyFromDerivation({
+        type: KeyDerivationType.LEAF,
+        path: leafId,
+      });
     }
 
     const address = await this.depositService!.generateDepositAddress({
@@ -1561,7 +1617,7 @@ export class SparkWallet extends EventEmitter {
     const signingJob: SigningJob = {
       rawTx: tx.toBytes(),
       signingPublicKey: await this.config.signer.getStaticDepositSigningKey(0),
-      signingNonceCommitment: signingNonceCommitment,
+      signingNonceCommitment: signingNonceCommitment.commitment,
     };
 
     const message = await this.getStaticDepositSigningPayload(
@@ -1613,7 +1669,10 @@ export class SparkWallet extends EventEmitter {
     const userSignature = await this.config.signer.signFrost({
       message: spendTxSighash,
       publicKey: swapResponse.depositAddress!.verifyingPublicKey,
-      privateAsPubKey: await this.config.signer.getStaticDepositSigningKey(0),
+      keyDerivation: {
+        type: KeyDerivationType.STATIC_DEPOSIT,
+        path: 0,
+      },
       selfCommitment: signingNonceCommitment,
       statechainCommitments:
         swapResponse.spendTxSigningResult!.signingNonceCommitments,
@@ -1797,7 +1856,7 @@ export class SparkWallet extends EventEmitter {
    * @private
    */
   private async finalizeDeposit({
-    signingPubKey,
+    keyDerivation,
     verifyingKey,
     depositTx,
     vout,
@@ -1811,7 +1870,7 @@ export class SparkWallet extends EventEmitter {
     }
 
     const res = await this.depositService!.createTreeRoot({
-      signingPubKey,
+      keyDerivation,
       verifyingKey,
       depositTx,
       vout,
@@ -1820,17 +1879,14 @@ export class SparkWallet extends EventEmitter {
     const resultingNodes: TreeNode[] = [];
     for (const node of res.nodes) {
       if (node.status === "AVAILABLE") {
-        const { nodes } = await this.transferService.extendTimelock(
-          node,
-          signingPubKey,
-        );
+        const { nodes } = await this.transferService.extendTimelock(node);
 
         for (const n of nodes) {
           if (n.status === "AVAILABLE") {
-            const transfer = await this.transferLeavesToSelf(
-              [n],
-              signingPubKey,
-            );
+            const transfer = await this.transferLeavesToSelf([n], {
+              type: KeyDerivationType.LEAF,
+              path: node.id,
+            });
             resultingNodes.push(...transfer);
           } else {
             resultingNodes.push(n);
@@ -1994,17 +2050,20 @@ export class SparkWallet extends EventEmitter {
         });
       }
 
-      let signingPubKey: Uint8Array;
+      let keyDerivation: KeyDerivation;
       if (!depositAddress.leafId) {
-        signingPubKey = depositAddress.userSigningPublicKey;
+        keyDerivation = {
+          type: KeyDerivationType.DEPOSIT,
+        };
       } else {
-        signingPubKey = await this.config.signer.generatePublicKey(
-          sha256(depositAddress.leafId),
-        );
+        keyDerivation = {
+          type: KeyDerivationType.LEAF,
+          path: depositAddress.leafId,
+        };
       }
 
       const nodes = await this.finalizeDeposit({
-        signingPubKey,
+        keyDerivation,
         verifyingKey: depositAddress.verifyingPublicKey,
         depositTx,
         vout,
@@ -2053,8 +2112,20 @@ export class SparkWallet extends EventEmitter {
       const unusedDepositAddress = unusedDepositAddresses.get(address);
       if (unusedDepositAddress) {
         vout = i;
+        let keyDerivation: KeyDerivation;
+        if (!unusedDepositAddress.leafId) {
+          keyDerivation = {
+            type: KeyDerivationType.DEPOSIT,
+          };
+        } else {
+          keyDerivation = {
+            type: KeyDerivationType.LEAF,
+            path: unusedDepositAddress.leafId,
+          };
+        }
+
         const response = await this.depositService!.createTreeRoot({
-          signingPubKey: unusedDepositAddress.userSigningPublicKey,
+          keyDerivation,
           verifyingKey: unusedDepositAddress.verifyingPublicKey,
           depositTx,
           vout,
@@ -2081,13 +2152,15 @@ export class SparkWallet extends EventEmitter {
    */
   private async transferLeavesToSelf(
     leaves: TreeNode[],
-    signingPubKey: Uint8Array,
+    keyDerivation: KeyDerivation,
   ): Promise<TreeNode[]> {
-    const leafKeyTweaks = await Promise.all(
+    const leafKeyTweaks: LeafKeyTweak[] = await Promise.all(
       leaves.map(async (leaf) => ({
         leaf,
-        signingPubKey,
-        newSigningPubKey: await this.config.signer.generatePublicKey(),
+        keyDerivation,
+        newKeyDerivation: {
+          type: KeyDerivationType.RANDOM,
+        },
       })),
     );
 
@@ -2168,13 +2241,16 @@ export class SparkWallet extends EventEmitter {
       leavesToSend = await this.checkRefreshTimelockNodes(leavesToSend);
       leavesToSend = await this.checkExtendTimeLockNodes(leavesToSend);
 
-      const leafKeyTweaks = await Promise.all(
+      const leafKeyTweaks: LeafKeyTweak[] = await Promise.all(
         leavesToSend.map(async (leaf) => ({
           leaf,
-          signingPubKey: await this.config.signer.generatePublicKey(
-            sha256(leaf.id),
-          ),
-          newSigningPubKey: await this.config.signer.generatePublicKey(),
+          keyDerivation: {
+            type: KeyDerivationType.LEAF,
+            path: leaf.id,
+          },
+          newKeyDerivation: {
+            type: KeyDerivationType.RANDOM,
+          },
         })),
       );
 
@@ -2232,15 +2308,12 @@ export class SparkWallet extends EventEmitter {
 
     const nodesToAdd: TreeNode[] = [];
     for (const node of nodesToExtend) {
-      const signingPubKey = await this.config.signer.generatePublicKey(
-        sha256(node.id),
-      );
-      const { nodes } = await this.transferService.extendTimelock(
-        node,
-        signingPubKey,
-      );
+      const { nodes } = await this.transferService.extendTimelock(node);
       this.leaves = this.leaves.filter((leaf) => leaf.id !== node.id);
-      const newNodes = await this.transferLeavesToSelf(nodes, signingPubKey);
+      const newNodes = await this.transferLeavesToSelf(nodes, {
+        type: KeyDerivationType.LEAF,
+        path: node.id,
+      });
       nodesToAdd.push(...newNodes);
     }
 
@@ -2312,7 +2385,6 @@ export class SparkWallet extends EventEmitter {
       const { nodes } = await this.transferService.refreshTimelockNodes(
         [node],
         parentNode,
-        await this.config.signer.generatePublicKey(sha256(node.id)),
       );
 
       if (nodes.length !== 1) {
@@ -2377,10 +2449,14 @@ export class SparkWallet extends EventEmitter {
                   ...leaf.leaf,
                   refundTx: leaf.intermediateRefundTx,
                 },
-                signingPubKey: leafPubKey,
-                newSigningPubKey: await this.config.signer.generatePublicKey(
-                  sha256(leaf.leaf.id),
-                ),
+                keyDerivation: {
+                  type: KeyDerivationType.ECIES,
+                  path: leaf.secretCipher,
+                },
+                newKeyDerivation: {
+                  type: KeyDerivationType.LEAF,
+                  path: leaf.leaf.id,
+                },
               });
             }
           }
@@ -2720,7 +2796,7 @@ export class SparkWallet extends EventEmitter {
 
     const amountSats = isZeroAmountInvoice
       ? amountSatsToSend!
-      : Number(amountMSats / 1000n);
+      : Math.ceil(Number(amountMSats) / 1000);
 
     if (isNaN(amountSats) || amountSats <= 0) {
       throw new ValidationError("Invalid amount", {
@@ -2788,13 +2864,16 @@ export class SparkWallet extends EventEmitter {
       leaves = await this.checkRefreshTimelockNodes(leaves);
       leaves = await this.checkExtendTimeLockNodes(leaves);
 
-      const leavesToSend = await Promise.all(
+      const leavesToSend: LeafKeyTweak[] = await Promise.all(
         leaves.map(async (leaf) => ({
           leaf,
-          signingPubKey: await this.config.signer.generatePublicKey(
-            sha256(leaf.id),
-          ),
-          newSigningPubKey: await this.config.signer.generatePublicKey(),
+          keyDerivation: {
+            type: KeyDerivationType.LEAF,
+            path: leaf.id,
+          },
+          newKeyDerivation: {
+            type: KeyDerivationType.RANDOM,
+          },
         })),
       );
 
@@ -3058,13 +3137,16 @@ export class SparkWallet extends EventEmitter {
     leavesToSendToSE = await this.checkRefreshTimelockNodes(leavesToSendToSE);
     leavesToSendToSE = await this.checkExtendTimeLockNodes(leavesToSendToSE);
 
-    const leafKeyTweaks = await Promise.all(
+    const leafKeyTweaks: LeafKeyTweak[] = await Promise.all(
       [...leavesToSendToSE, ...leavesToSendToSsp].map(async (leaf) => ({
         leaf,
-        signingPubKey: await this.config.signer.generatePublicKey(
-          sha256(leaf.id),
-        ),
-        newSigningPubKey: await this.config.signer.generatePublicKey(),
+        keyDerivation: {
+          type: KeyDerivationType.LEAF,
+          path: leaf.id,
+        },
+        newKeyDerivation: {
+          type: KeyDerivationType.RANDOM,
+        },
       })),
     );
 
@@ -3213,7 +3295,6 @@ export class SparkWallet extends EventEmitter {
       await this.tokenTransactionService.fetchOwnedTokenOutputs({
         ownerPublicKeys: [await this.config.signer.getIdentityPublicKey()],
       });
-
     const filteredTokenOutputs = unsortedTokenOutputs.filter(
       (output) =>
         !this.pendingWithdrawnOutputIds.includes(output.output?.id || ""),
@@ -3226,21 +3307,21 @@ export class SparkWallet extends EventEmitter {
       (id) => fetchedOutputIds.has(id),
     );
 
-    // Group leaves by token key
-    const groupedOutputs = new Map<
-      string,
-      OutputWithPreviousTransactionData[]
-    >();
+    // Group outputs by hex representation of raw token identifier bytes
+    const groupedOutputs: TokenOutputsMap = new Map();
 
     filteredTokenOutputs.forEach((output) => {
-      const tokenKey = bytesToHex(output.output!.tokenPublicKey!);
+      const bech32mTokenIdentifier = encodeBech32mTokenIdentifier({
+        tokenIdentifier: output.output!.tokenIdentifier!,
+        network: this.config.getNetworkType(),
+      });
       const index = output.previousTransactionVout!;
 
-      if (!groupedOutputs.has(tokenKey)) {
-        groupedOutputs.set(tokenKey, []);
+      if (!groupedOutputs.has(bech32mTokenIdentifier)) {
+        groupedOutputs.set(bech32mTokenIdentifier, []);
       }
 
-      groupedOutputs.get(tokenKey)!.push({
+      groupedOutputs.get(bech32mTokenIdentifier)!.push({
         ...output,
         previousTransactionVout: index,
       });
@@ -3260,13 +3341,13 @@ export class SparkWallet extends EventEmitter {
    * @returns {Promise<string>} The transaction ID of the token transfer
    */
   public async transferTokens({
-    tokenPublicKey,
+    tokenIdentifier,
     tokenAmount,
     receiverSparkAddress,
     outputSelectionStrategy,
     selectedOutputs,
   }: {
-    tokenPublicKey: string;
+    tokenIdentifier: Bech32mTokenIdentifier;
     tokenAmount: bigint;
     receiverSparkAddress: string;
     outputSelectionStrategy?: "SMALL_FIRST" | "LARGE_FIRST";
@@ -3278,7 +3359,7 @@ export class SparkWallet extends EventEmitter {
       this.tokenOutputs,
       [
         {
-          tokenPublicKey,
+          tokenIdentifier,
           tokenAmount,
           receiverSparkAddress,
         },
@@ -3300,7 +3381,7 @@ export class SparkWallet extends EventEmitter {
    */
   public async batchTransferTokens(
     receiverOutputs: {
-      tokenPublicKey: string;
+      tokenIdentifier: Bech32mTokenIdentifier;
       tokenAmount: bigint;
       receiverSparkAddress: string;
     }[],
@@ -3314,9 +3395,9 @@ export class SparkWallet extends EventEmitter {
         expected: "Non-empty array",
       });
     }
-    const firstTokenPublicKey = receiverOutputs[0]!.tokenPublicKey;
+    const firstBech32mTokenIdentifier = receiverOutputs[0]!.tokenIdentifier;
     const allSameToken = receiverOutputs.every(
-      (output) => output.tokenPublicKey === firstTokenPublicKey,
+      (output) => output.tokenIdentifier === firstBech32mTokenIdentifier,
     );
     if (!allSameToken) {
       throw new ValidationError(
@@ -3331,9 +3412,16 @@ export class SparkWallet extends EventEmitter {
 
     await this.syncTokenOutputs();
 
+    // replace bech32m encoded token identifier with raw token identifier bytes
+    const transferOutputs = receiverOutputs.map((output) => ({
+      tokenIdentifier: firstBech32mTokenIdentifier,
+      tokenAmount: output.tokenAmount,
+      receiverSparkAddress: output.receiverSparkAddress,
+    }));
+
     return this.tokenTransactionService.tokenTransfer(
       this.tokenOutputs,
-      receiverOutputs,
+      transferOutputs,
       outputSelectionStrategy,
       selectedOutputs,
     );
@@ -3350,19 +3438,32 @@ export class SparkWallet extends EventEmitter {
    * @param outputIds - Optional array of output IDs to filter by
    * @returns Promise resolving to array of token transactions with their current status
    */
-  public async queryTokenTransactions(
-    ownerPublicKeys?: string[],
-    issuerPublicKeys?: string[],
-    tokenTransactionHashes?: string[],
-    tokenIdentifiers?: string[],
-    outputIds?: string[],
-  ): Promise<TokenTransactionWithStatus[]> {
+
+  public async queryTokenTransactions({
+    ownerPublicKeys,
+    issuerPublicKeys,
+    tokenTransactionHashes,
+    tokenIdentifiers,
+    outputIds,
+    pageSize = 100,
+    offset = 0,
+  }: {
+    ownerPublicKeys?: string[];
+    issuerPublicKeys?: string[];
+    tokenTransactionHashes?: string[];
+    tokenIdentifiers?: string[];
+    outputIds?: string[];
+    pageSize?: number;
+    offset?: number;
+  }): Promise<TokenTransactionWithStatus[]> {
     return this.tokenTransactionService.queryTokenTransactions({
       ownerPublicKeys,
       issuerPublicKeys,
       tokenTransactionHashes,
       tokenIdentifiers,
       outputIds,
+      pageSize,
+      offset,
     }) as Promise<TokenTransactionWithStatus[]>;
   }
 
@@ -3782,16 +3883,10 @@ export class SparkWallet extends EventEmitter {
         });
       }
 
-      // Generate signing public key for this node
-      const signingPubKey = await this.config.signer.generatePublicKey(
-        sha256(node.id),
-      );
-
       // Call the transfer service to refresh the timelock
       const result = await this.transferService.refreshTimelockNodes(
         [node],
         parentNode,
-        signingPubKey,
       );
 
       // Update the local leaves if this node is in our wallet
@@ -3844,16 +3939,8 @@ export class SparkWallet extends EventEmitter {
         });
       }
 
-      // Generate signing public key for this node
-      const signingPubKey = await this.config.signer.generatePublicKey(
-        sha256(node.id),
-      );
-
       // Call the transfer service to refresh the refund timelock
-      const result = await this.transferService.refreshTimelockRefundTx(
-        node,
-        signingPubKey,
-      );
+      const result = await this.transferService.refreshTimelockRefundTx(node);
 
       // Update the local leaves if this node is in our wallet
       const leafIndex = this.leaves.findIndex((leaf) => leaf.id === node.id);

@@ -2,7 +2,9 @@ import { afterEach, beforeAll, describe, expect, it } from "@jest/globals";
 import { hexToBytes } from "@noble/curves/abstract/utils";
 import { sha256 } from "@noble/hashes/sha2";
 import { equalBytes } from "@scure/btc-signer/utils";
+import { uuidv7 } from "uuidv7";
 import LightningReceiveRequest from "../../graphql/objects/LightningReceiveRequest.js";
+import { KeyDerivation, KeyDerivationType } from "../../index.js";
 import { TransferStatus } from "../../proto/spark.js";
 import { WalletConfigService } from "../../services/config.js";
 import { ConnectionManager } from "../../services/connection.js";
@@ -15,7 +17,11 @@ import {
   CurrencyUnit,
   LightningReceiveRequestStatus,
 } from "../../types/index.js";
-import { createNewTree, getTestWalletConfig } from "../test-utils.js";
+import {
+  createNewTree,
+  getTestWalletConfig,
+  signerTypes,
+} from "../test-utils.js";
 import { SparkWalletTesting } from "../utils/spark-testing-wallet.js";
 import { BitcoinFaucet } from "../utils/test-faucet.js";
 
@@ -66,7 +72,7 @@ const fakeInvoiceCreator = async (): Promise<LightningReceiveRequest> => {
   };
 };
 
-describe("LightningService", () => {
+describe.each(signerTypes)("LightningService", ({ name, Signer }) => {
   let userWallet: SparkWalletTesting;
   let userConfig: WalletConfigService;
   let lightningService: LightningService;
@@ -84,6 +90,7 @@ describe("LightningService", () => {
       options: {
         network: "LOCAL",
       },
+      signer: new Signer(),
     });
 
     userWallet = wallet1;
@@ -111,6 +118,7 @@ describe("LightningService", () => {
       options: {
         network: "LOCAL",
       },
+      signer: new Signer(),
     });
 
     sspWallet = wallet2;
@@ -138,7 +146,7 @@ describe("LightningService", () => {
     await cleanUp();
   });
 
-  it("should create an invoice", async () => {
+  it(`${name} - should create an invoice`, async () => {
     const preimage = hexToBytes(
       "2d059c3ede82a107aa1452c0bea47759be3c5c6e5342be6a310f6c3a907d9f4c",
     );
@@ -153,7 +161,7 @@ describe("LightningService", () => {
     expect(invoice).toBeDefined();
   });
 
-  it("test receive lightning payment", async () => {
+  it(`${name} - test receive lightning payment`, async () => {
     const faucet = BitcoinFaucet.getInstance();
 
     const preimage = hexToBytes(
@@ -170,23 +178,22 @@ describe("LightningService", () => {
 
     expect(invoice).toBeDefined();
 
-    const sspLeafPubKey = await sspWallet.getSigner().generatePublicKey();
-    const nodeToSend = await createNewTree(
-      sspWallet,
-      sspLeafPubKey,
-      faucet,
-      12345n,
-    );
+    const leafId = uuidv7();
+    const nodeToSend = await createNewTree(sspWallet, leafId, faucet, 12345n);
 
-    const newLeafPubKey = await sspWallet
-      .getSigner()
-      .generatePublicKey(sha256("1"));
+    const newDerivationPath: KeyDerivation = {
+      type: KeyDerivationType.LEAF,
+      path: uuidv7(),
+    };
 
     const leaves: LeafKeyTweak[] = [
       {
         leaf: nodeToSend,
-        signingPubKey: sspLeafPubKey,
-        newSigningPubKey: newLeafPubKey,
+        keyDerivation: {
+          type: KeyDerivationType.LEAF,
+          path: leafId,
+        },
+        newKeyDerivation: newDerivationPath,
       },
     ];
 
@@ -227,25 +234,34 @@ describe("LightningService", () => {
 
     expect(leafPrivKeyMap.size).toBe(1);
     expect(leafPrivKeyMap.has(nodeToSend.id)).toBe(true);
-    expect(equalBytes(leafPrivKeyMap.get(nodeToSend.id)!, newLeafPubKey)).toBe(
-      true,
-    );
-
-    const finalLeafPubKey = await userWallet.getSigner().generatePublicKey();
+    expect(
+      equalBytes(
+        leafPrivKeyMap.get(nodeToSend.id)!,
+        await sspConfig.signer.getPublicKeyFromDerivation(newDerivationPath),
+      ),
+    ).toBe(true);
 
     const leaf = receiverTransfer!.leaves[0]!.leaf;
     expect(leaf).toBeDefined();
 
-    const claimingNode = {
-      leaf: leaf!,
-      signingPubKey: newLeafPubKey,
-      newSigningPubKey: finalLeafPubKey,
-    };
+    const claimingNodes: LeafKeyTweak[] = receiverTransfer!.leaves.map(
+      (leaf) => ({
+        leaf: leaf.leaf!,
+        keyDerivation: {
+          type: KeyDerivationType.ECIES,
+          path: leaf.secretCipher,
+        },
+        newKeyDerivation: {
+          type: KeyDerivationType.LEAF,
+          path: leaf.leaf!.id,
+        },
+      }),
+    );
 
-    await transferService.claimTransfer(receiverTransfer!, [claimingNode]);
+    await transferService.claimTransfer(receiverTransfer!, claimingNodes);
   }, 60000);
 
-  it("test receive lightning v2 payment", async () => {
+  it(`${name} - test receive lightning v2 payment`, async () => {
     const faucet = BitcoinFaucet.getInstance();
 
     const preimage = hexToBytes(
@@ -262,23 +278,21 @@ describe("LightningService", () => {
 
     expect(invoice).toBeDefined();
 
-    const sspLeafPubKey = await sspWallet.getSigner().generatePublicKey();
-    const nodeToSend = await createNewTree(
-      sspWallet,
-      sspLeafPubKey,
-      faucet,
-      12345n,
-    );
+    const leafId = uuidv7();
+    const nodeToSend = await createNewTree(sspWallet, leafId, faucet, 12345n);
 
-    const newLeafPubKey = await sspWallet
-      .getSigner()
-      .generatePublicKey(sha256("1"));
-
+    const newKeyDerivation: KeyDerivation = {
+      type: KeyDerivationType.LEAF,
+      path: uuidv7(),
+    };
     const leaves: LeafKeyTweak[] = [
       {
         leaf: nodeToSend,
-        signingPubKey: sspLeafPubKey,
-        newSigningPubKey: newLeafPubKey,
+        keyDerivation: {
+          type: KeyDerivationType.LEAF,
+          path: leafId,
+        },
+        newKeyDerivation,
       },
     ];
 
@@ -319,25 +333,34 @@ describe("LightningService", () => {
 
     expect(leafPrivKeyMap.size).toBe(1);
     expect(leafPrivKeyMap.has(nodeToSend.id)).toBe(true);
-    expect(equalBytes(leafPrivKeyMap.get(nodeToSend.id)!, newLeafPubKey)).toBe(
-      true,
-    );
-
-    const finalLeafPubKey = await userWallet.getSigner().generatePublicKey();
+    expect(
+      equalBytes(
+        leafPrivKeyMap.get(nodeToSend.id)!,
+        await sspConfig.signer.getPublicKeyFromDerivation(newKeyDerivation),
+      ),
+    ).toBe(true);
 
     const leaf = receiverTransfer!.leaves[0]!.leaf;
     expect(leaf).toBeDefined();
 
-    const claimingNode = {
-      leaf: leaf!,
-      signingPubKey: newLeafPubKey,
-      newSigningPubKey: finalLeafPubKey,
-    };
+    const claimingNodes: LeafKeyTweak[] = receiverTransfer!.leaves.map(
+      (leaf) => ({
+        leaf: leaf.leaf!,
+        keyDerivation: {
+          type: KeyDerivationType.ECIES,
+          path: leaf.secretCipher,
+        },
+        newKeyDerivation: {
+          type: KeyDerivationType.LEAF,
+          path: leaf.leaf!.id,
+        },
+      }),
+    );
 
-    await transferService.claimTransfer(receiverTransfer!, [claimingNode]);
+    await transferService.claimTransfer(receiverTransfer!, claimingNodes);
   }, 60000);
 
-  it("test send lightning payment", async () => {
+  it(`${name} - test send lightning payment`, async () => {
     const faucet = BitcoinFaucet.getInstance();
 
     const preimage = hexToBytes(
@@ -345,25 +368,22 @@ describe("LightningService", () => {
     );
     const paymentHash = sha256(preimage);
 
-    const userLeafPubKey = await userWallet
-      .getSigner()
-      .generatePublicKey(sha256("1"));
-    const nodeToSend = await createNewTree(
-      userWallet,
-      userLeafPubKey,
-      faucet,
-      12345n,
-    );
+    const leafId = uuidv7();
+    const nodeToSend = await createNewTree(userWallet, leafId, faucet, 12345n);
 
-    const newLeafPubKey = await userWallet
-      .getSigner()
-      .generatePublicKey(sha256("2"));
+    const newKeyDerivation: KeyDerivation = {
+      type: KeyDerivationType.LEAF,
+      path: uuidv7(),
+    };
 
     const leaves: LeafKeyTweak[] = [
       {
         leaf: nodeToSend,
-        signingPubKey: userLeafPubKey,
-        newSigningPubKey: newLeafPubKey,
+        keyDerivation: {
+          type: KeyDerivationType.LEAF,
+          path: leafId,
+        },
+        newKeyDerivation,
       },
     ];
 
@@ -410,26 +430,33 @@ describe("LightningService", () => {
 
     expect(leafPrivKeyMap.size).toBe(1);
     expect(leafPrivKeyMap.has(nodeToSend.id)).toBe(true);
-    expect(equalBytes(leafPrivKeyMap.get(nodeToSend.id)!, newLeafPubKey)).toBe(
-      true,
-    );
-
-    const finalLeafPubKey = await sspWallet
-      .getSigner()
-      .generatePublicKey(sha256("2"));
+    expect(
+      equalBytes(
+        leafPrivKeyMap.get(nodeToSend.id)!,
+        await userConfig.signer.getPublicKeyFromDerivation(newKeyDerivation),
+      ),
+    ).toBe(true);
 
     expect(receiverTransfer.leaves[0]!.leaf).toBeDefined();
 
-    const claimingNode = {
-      leaf: receiverTransfer.leaves[0]!.leaf!,
-      signingPubKey: newLeafPubKey,
-      newSigningPubKey: finalLeafPubKey,
-    };
+    const claimingNodes: LeafKeyTweak[] = receiverTransfer!.leaves.map(
+      (leaf) => ({
+        leaf: leaf.leaf!,
+        keyDerivation: {
+          type: KeyDerivationType.ECIES,
+          path: leaf.secretCipher,
+        },
+        newKeyDerivation: {
+          type: KeyDerivationType.LEAF,
+          path: leaf.leaf!.id,
+        },
+      }),
+    );
 
-    await sspTransferService.claimTransfer(receiverTransfer, [claimingNode]);
+    await sspTransferService.claimTransfer(receiverTransfer, claimingNodes);
   }, 60000);
 
-  it("test send lightning v2 payment", async () => {
+  it(`${name} - test send lightning v2 payment`, async () => {
     const faucet = BitcoinFaucet.getInstance();
 
     const preimage = hexToBytes(
@@ -437,25 +464,22 @@ describe("LightningService", () => {
     );
     const paymentHash = sha256(preimage);
 
-    const userLeafPubKey = await userWallet
-      .getSigner()
-      .generatePublicKey(sha256("1"));
-    const nodeToSend = await createNewTree(
-      userWallet,
-      userLeafPubKey,
-      faucet,
-      12345n,
-    );
+    const leafId = uuidv7();
+    const nodeToSend = await createNewTree(userWallet, leafId, faucet, 12345n);
 
-    const newLeafPubKey = await userWallet
-      .getSigner()
-      .generatePublicKey(sha256("2"));
+    const newKeyDerivation: KeyDerivation = {
+      type: KeyDerivationType.LEAF,
+      path: uuidv7(),
+    };
 
     const leaves: LeafKeyTweak[] = [
       {
         leaf: nodeToSend,
-        signingPubKey: userLeafPubKey,
-        newSigningPubKey: newLeafPubKey,
+        keyDerivation: {
+          type: KeyDerivationType.LEAF,
+          path: leafId,
+        },
+        newKeyDerivation,
       },
     ];
 
@@ -502,22 +526,29 @@ describe("LightningService", () => {
 
     expect(leafPrivKeyMap.size).toBe(1);
     expect(leafPrivKeyMap.has(nodeToSend.id)).toBe(true);
-    expect(equalBytes(leafPrivKeyMap.get(nodeToSend.id)!, newLeafPubKey)).toBe(
-      true,
-    );
-
-    const finalLeafPubKey = await sspWallet
-      .getSigner()
-      .generatePublicKey(sha256("2"));
+    expect(
+      equalBytes(
+        leafPrivKeyMap.get(nodeToSend.id)!,
+        await userConfig.signer.getPublicKeyFromDerivation(newKeyDerivation),
+      ),
+    ).toBe(true);
 
     expect(receiverTransfer.leaves[0]!.leaf).toBeDefined();
 
-    const claimingNode = {
-      leaf: receiverTransfer.leaves[0]!.leaf!,
-      signingPubKey: newLeafPubKey,
-      newSigningPubKey: finalLeafPubKey,
-    };
+    const claimingNodes: LeafKeyTweak[] = receiverTransfer!.leaves.map(
+      (leaf) => ({
+        leaf: leaf.leaf!,
+        keyDerivation: {
+          type: KeyDerivationType.ECIES,
+          path: leaf.secretCipher,
+        },
+        newKeyDerivation: {
+          type: KeyDerivationType.LEAF,
+          path: leaf.leaf!.id,
+        },
+      }),
+    );
 
-    await sspTransferService.claimTransfer(receiverTransfer, [claimingNode]);
+    await sspTransferService.claimTransfer(receiverTransfer, claimingNodes);
   }, 60000);
 });

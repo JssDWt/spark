@@ -1,5 +1,4 @@
 import { hexToBytes } from "@noble/curves/abstract/utils";
-import { sha256 } from "@noble/hashes/sha2";
 import { Address, OutScript, Transaction } from "@scure/btc-signer";
 import { NetworkError, ValidationError } from "../errors/index.js";
 import {
@@ -16,7 +15,10 @@ import {
   SigningJob,
   TreeNode,
 } from "../proto/spark.js";
-import { SigningCommitment } from "../signer/types.js";
+import {
+  KeyDerivationType,
+  SigningCommitmentWithOptionalNonce,
+} from "../signer/types.js";
 import {
   getP2TRAddressFromPublicKey,
   getSigHashFromTx,
@@ -39,8 +41,8 @@ export type DepositAddressTree = {
 };
 
 export type CreationNodeWithNonces = CreationNode & {
-  nodeTxSigningCommitment?: SigningCommitment | undefined;
-  refundTxSigningCommitment?: SigningCommitment | undefined;
+  nodeTxSigningCommitment?: SigningCommitmentWithOptionalNonce | undefined;
+  refundTxSigningCommitment?: SigningCommitmentWithOptionalNonce | undefined;
 };
 
 const INITIAL_TIME_LOCK = 2000;
@@ -245,16 +247,19 @@ export class TreeCreationService {
     targetSigningPublicKey: Uint8Array,
     nodeId: string,
   ): Promise<DepositAddressTree[]> {
-    const leftKey = await this.config.signer.generatePublicKey(sha256(nodeId));
+    // TODO: If we decide to reimplement tree-creation into the SDK
+    // this needs to be updated to use the new derivation path based signing
     const leftNode: DepositAddressTree = {
-      signingPublicKey: leftKey,
+      // signingPublicKey: leftKey,
+      signingPublicKey: targetSigningPublicKey,
       children: [],
     };
 
     const rightKey =
-      await this.config.signer.subtractPrivateKeysGivenPublicKeys(
-        targetSigningPublicKey,
-        leftKey,
+      await this.config.signer.subtractPrivateKeysGivenDerivationPaths(
+        // targetSigningPublicKey,
+        nodeId,
+        nodeId,
       );
 
     const rightNode: DepositAddressTree = {
@@ -343,7 +348,7 @@ export class TreeCreationService {
     const signingJob: SigningJob = {
       signingPublicKey: node.signingPublicKey,
       rawTx: tx.toBytes(),
-      signingNonceCommitment: signingNonceCommitment,
+      signingNonceCommitment: signingNonceCommitment.commitment,
     };
 
     internalCreationNode.nodeTxSigningCommitment = signingNonceCommitment;
@@ -380,7 +385,7 @@ export class TreeCreationService {
     const childSigningJob: SigningJob = {
       signingPublicKey: node.signingPublicKey,
       rawTx: childTx.toBytes(),
-      signingNonceCommitment: childSigningNonceCommitment,
+      signingNonceCommitment: childSigningNonceCommitment.commitment,
     };
 
     childCreationNode.nodeTxSigningCommitment = childSigningNonceCommitment;
@@ -414,7 +419,7 @@ export class TreeCreationService {
     const refundSigningJob: SigningJob = {
       signingPublicKey: node.signingPublicKey,
       rawTx: refundTx.toBytes(),
-      signingNonceCommitment: refundSigningNonceCommitment,
+      signingNonceCommitment: refundSigningNonceCommitment.commitment,
     };
     childCreationNode.refundTxSigningCommitment = refundSigningNonceCommitment;
     childCreationNode.refundTxSigningJob = refundSigningJob;
@@ -464,7 +469,7 @@ export class TreeCreationService {
     const rootNodeSigningJob: SigningJob = {
       signingPublicKey: root.signingPublicKey,
       rawTx: rootNodeTx.toBytes(),
-      signingNonceCommitment: rootNodeSigningCommitment,
+      signingNonceCommitment: rootNodeSigningCommitment.commitment,
     };
     const rootCreationNode: CreationNodeWithNonces = {
       nodeTxSigningJob: rootNodeSigningJob,
@@ -528,7 +533,10 @@ export class TreeCreationService {
       const userSignature = await this.config.signer.signFrost({
         message: txSighash,
         publicKey: creationNode.nodeTxSigningJob.signingPublicKey,
-        privateAsPubKey: internalNode.signingPublicKey,
+        keyDerivation: {
+          type: KeyDerivationType.LEAF,
+          path: creationResponseNode.nodeId,
+        },
         selfCommitment: creationNode.nodeTxSigningCommitment,
         statechainCommitments:
           creationResponseNode.nodeTxSigningResult?.signingNonceCommitments,
@@ -565,7 +573,10 @@ export class TreeCreationService {
       const refundSigningResponse = await this.config.signer.signFrost({
         message: refundTxSighash,
         publicKey: creationNode.refundTxSigningJob.signingPublicKey,
-        privateAsPubKey: internalNode.signingPublicKey,
+        keyDerivation: {
+          type: KeyDerivationType.LEAF,
+          path: creationResponseNode.nodeId,
+        },
         selfCommitment: creationNode.refundTxSigningCommitment,
         statechainCommitments:
           creationResponseNode.refundTxSigningResult?.signingNonceCommitments,

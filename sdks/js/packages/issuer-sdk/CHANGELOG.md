@@ -1,5 +1,48 @@
 # @buildonspark/issuer-sdk
 
+## 0.0.82
+
+### Patch Changes
+
+- -leaf key improvements
+  -token improvements
+- Updated dependencies
+  - @buildonspark/spark-sdk@0.2.3
+
+## 0.0.81
+
+### Patch Changes
+
+- Updated dependencies
+  - @buildonspark/spark-sdk@0.2.2
+
+## 0.0.80
+
+### Patch Changes
+
+- tokens changes
+  - Bech32mTokenIdentifier prefix change from "btk" -> "btkn"
+
+- Updated dependencies
+  - @buildonspark/lrc20-sdk@0.0.60
+  - @buildonspark/spark-sdk@0.2.1
+
+## 0.0.79
+
+### Patch Changes
+
+- Updated dependencies
+  - @buildonspark/spark-sdk@0.2.0
+
+## 0.0.78
+
+### Patch Changes
+
+- - Renamed getIssuerTokenInfo() to getIssuerTokenMetadata() to better reflect its purpose
+  - Renamed fields to match the new API response (e.g., tokenSymbol → tokenTicker, tokenDecimals → decimals)
+- Updated dependencies
+  - @buildonspark/spark-sdk@0.1.47
+
 ## 0.0.77
 
 ### Patch Changes
