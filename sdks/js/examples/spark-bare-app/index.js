@@ -5,4 +5,11 @@ import frost from '@buildonspark/spark-frost-bare-addon';
 console.log('Addon hello:', frost.hello());
 
 const wallet = new SparkWallet();
-console.log('Created SparkWallet instance', wallet);
+
+try {
+  const initWalletResult = await wallet.initWallet();
+} catch (error) {
+  console.error('Error initializing wallet:', error);
+}
+
+console.log('Wallet initialized:', wallet);

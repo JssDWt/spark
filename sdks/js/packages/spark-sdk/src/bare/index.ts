@@ -50,7 +50,8 @@ const fetchWithSafeBody: SparkFetch = async (input, init = {}) => {
     init.headers.set("Content-Length", init.body.byteLength.toString());
   }
 
-  const result = await abortableBareFetch(input);
+  console.log("tmp fetchWithSafeBody await abortableBareFetch(input, init)");
+  const result = await abortableBareFetch(input, init);
   console.log("tmp fetchWithSafeBody result:", result);
   return result;
 };
