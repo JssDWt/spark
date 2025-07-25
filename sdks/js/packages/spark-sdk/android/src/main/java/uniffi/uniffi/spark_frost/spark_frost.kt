@@ -776,6 +776,15 @@ internal interface UniffiLib : Library {
         uniffi_out_err: UniffiRustCallStatus,
     ): RustBuffer.ByValue
 
+    fun uniffi_spark_frost_fn_func_construct_direct_refund_tx(
+        `tx`: RustBuffer.ByValue,
+        `vout`: Int,
+        `pubkey`: RustBuffer.ByValue,
+        `network`: RustBuffer.ByValue,
+        `locktime`: Short,
+        uniffi_out_err: UniffiRustCallStatus,
+    ): RustBuffer.ByValue
+
     fun uniffi_spark_frost_fn_func_construct_node_tx(
         `tx`: RustBuffer.ByValue,
         `vout`: Int,
@@ -1062,6 +1071,8 @@ internal interface UniffiLib : Library {
 
     fun uniffi_spark_frost_checksum_func_aggregate_frost(): Short
 
+    fun uniffi_spark_frost_checksum_func_construct_direct_refund_tx(): Short
+
     fun uniffi_spark_frost_checksum_func_construct_node_tx(): Short
 
     fun uniffi_spark_frost_checksum_func_construct_refund_tx(): Short
@@ -1096,6 +1107,9 @@ private fun uniffiCheckContractApiVersion(lib: UniffiLib) {
 @Suppress("UNUSED_PARAMETER")
 private fun uniffiCheckApiChecksums(lib: UniffiLib) {
     if (lib.uniffi_spark_frost_checksum_func_aggregate_frost() != 50841.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_spark_frost_checksum_func_construct_direct_refund_tx() != 21321.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_spark_frost_checksum_func_construct_node_tx() != 50549.toShort()) {
@@ -1734,6 +1748,27 @@ fun `aggregateFrost`(
                 FfiConverterByteArray.lower(`selfPublicKey`),
                 FfiConverterByteArray.lower(`verifyingKey`),
                 FfiConverterOptionalByteArray.lower(`adaptorPublicKey`),
+                _status,
+            )
+        },
+    )
+
+@Throws(Exception::class)
+fun `constructDirectRefundTx`(
+    `tx`: kotlin.ByteArray,
+    `vout`: kotlin.UInt,
+    `pubkey`: kotlin.ByteArray,
+    `network`: kotlin.String,
+    `locktime`: kotlin.UShort,
+): TransactionResult =
+    FfiConverterTypeTransactionResult.lift(
+        uniffiRustCallWithError(Exception) { _status ->
+            UniffiLib.INSTANCE.uniffi_spark_frost_fn_func_construct_direct_refund_tx(
+                FfiConverterByteArray.lower(`tx`),
+                FfiConverterUInt.lower(`vout`),
+                FfiConverterByteArray.lower(`pubkey`),
+                FfiConverterString.lower(`network`),
+                FfiConverterUShort.lower(`locktime`),
                 _status,
             )
         },

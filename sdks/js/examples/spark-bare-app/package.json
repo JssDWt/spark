@@ -7,7 +7,7 @@
     "build": "bare index.js"
   },
   "dependencies": {
-    "@buildonspark/spark-sdk": "^0.1.45"
+    "@buildonspark/spark-sdk": "^0.2.2"
   },
   "installConfig": {
     "hoistingLimits": "dependencies"

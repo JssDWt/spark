@@ -5,8 +5,8 @@ use bare_rust::{
 use spark_frost::bridge::{create_dummy_tx};
 
 use frost_secp256k1_tr::Identifier;
-use hex;
 use std::collections::HashMap;
+use bare_rust::Number;
 
 macro_rules! log_binding {
     ($($arg:tt)*) => {
@@ -51,16 +51,14 @@ pub extern "C" fn bare_addon_exports(
         .set_named_property("hello", function)
         .unwrap();
 
-    // createDummyTx(address: string, amountSats: bigint | number)
+    // createDummyTx(address: string, amountSats: bigint | number) -> { tx: Uint8Array, txid: string }
     let create_dummy_tx_fn = Function::new(&env, |env, info| -> Result<Value, Value> {
         let js_addr: String = info.arg(0).ok_or(js_err(env, "address argument missing or not a string"))?;
 
         let address: std::string::String = js_addr.into();
-        log_binding!("got address: {:?}", address);
 
         let bigint: BigInt = info.arg(1).ok_or(js_err(env, "amountSats argument missing or not a bigint"))?;
         let amount = u64::from(bigint);
-        log_binding!("got amount sats: {}", amount);
 
         match create_dummy_tx(&address, amount) {
             Ok(dummy) => {
@@ -72,7 +70,6 @@ pub extern "C" fn bare_addon_exports(
                 Ok(obj.into())
             }
             Err(e) => {
-                log_binding!("error creating dummy tx: {}", e);
                 Err(js_err(env, &format!("failed to create dummy tx: {}", e)))
             },
         }
@@ -82,7 +79,7 @@ pub extern "C" fn bare_addon_exports(
         .set_named_property("createDummyTx", create_dummy_tx_fn)
         .unwrap();
 
-    // encryptEcies({ msg: Uint8Array, publicKey: Uint8Array }) -> Uint8Array
+    // encryptEcies(msg: Uint8Array, publicKey: Uint8Array) -> Uint8Array
     let encrypt_ecies_fn = Function::new(&env, |env, info| -> Result<Value, Value> {
         let msg_arr: Uint8Array = info.arg(0).ok_or(js_err(env, "msg argument missing or not a Uint8Array"))?;
         let pk_arr: Uint8Array = info.arg(1).ok_or(js_err(env, "publicKey argument missing or not a Uint8Array"))?;
@@ -99,7 +96,7 @@ pub extern "C" fn bare_addon_exports(
 
     exports.set_named_property("encryptEcies", encrypt_ecies_fn).unwrap();
 
-    // decryptEcies({ ciphertext: Uint8Array, secretKey: Uint8Array }) -> Uint8Array
+    // decryptEcies(ciphertext: Uint8Array, secretKey: Uint8Array) -> Uint8Array
     let decrypt_ecies_fn = Function::new(&env, |env, info| -> Result<Value, Value> {
         let ct_arr: Uint8Array = info.arg(0).ok_or(js_err(env, "ciphertext argument missing or not a Uint8Array"))?;
         let sk_arr: Uint8Array = info.arg(1).ok_or(js_err(env, "secretKey argument missing or not a Uint8Array"))?;
@@ -116,7 +113,7 @@ pub extern "C" fn bare_addon_exports(
 
     exports.set_named_property("decryptEcies", decrypt_ecies_fn).unwrap();
 
-    // signFrost(msg, keyPackage, nonce, selfCommitment, commitments, adaptorPubKey?)
+    // signFrost(msg, keyPackage, nonce, selfCommitment, statechainCommitments?, adaptorPubKey?)
     let sign_frost_fn = Function::new(&env, |env, info| -> Result<Value, Value> {
         // msg
         let msg_arr: Uint8Array = info.arg(0).ok_or(js_err(env, "msg argument missing"))?;
@@ -142,28 +139,50 @@ pub extern "C" fn bare_addon_exports(
         let nonce_obj: Object = info.arg(2).ok_or(js_err(env, "nonce argument missing"))?;
         let nonce_hiding = get_uint8_vec(env, &nonce_obj, "hiding")?;
         let nonce_binding = get_uint8_vec(env, &nonce_obj, "binding")?;
+
         let nonce_proto = spark_frost::proto::frost::SigningNonce { hiding: nonce_hiding, binding: nonce_binding };
 
         // self commitment
         let self_commit_obj: Object = info.arg(3).ok_or(js_err(env, "selfCommitment argument missing"))?;
         let self_commit_proto = js_commitment_to_proto(env, &self_commit_obj)?;
 
-        // commitments map arg4 (currently expect empty or ignored)
-        let commitments_proto: HashMap<std::string::String, spark_frost::proto::common::SigningCommitment> = HashMap::new();
+        // statechain_commitments map (Array<[id, {hiding,binding}]>)
+        let statechain_commitments_proto: HashMap<std::string::String, spark_frost::proto::common::SigningCommitment> = {
+            let mut map = HashMap::new();
+
+            if let Some(arr_obj) = info.arg::<Object>(4) {
+                let len_num: Number = arr_obj.get_named_property("length")?;
+                let len: u32 = f64::from(len_num) as u32;
+
+                for i in 0..len {
+                    let pair_obj: Object = arr_obj.get_element(i)?;
+
+                    let id_br: String = pair_obj.get_element(0)?;
+                    let id: std::string::String = id_br.into();
+
+                    let commit_obj: Object = pair_obj.get_element(1)?;
+                    let commit_proto = js_commitment_to_proto(env, &commit_obj)?;
+
+                    map.insert(id.clone(), commit_proto);
+                }
+            }
+
+            map
+        };
 
         // adaptor public key (optional)
         let adaptor_pk: Option<Vec<u8>> = info.arg(5).map(|a: Uint8Array| a.as_slice().to_vec());
 
-        // Call bridge
         match spark_frost::bridge::sign_frost(
             msg_arr.as_slice().to_vec(),
             kp_proto,
             nonce_proto,
             self_commit_proto,
-            commitments_proto,
+            statechain_commitments_proto,
             adaptor_pk,
         ) {
             Ok(sig) => {
+                log_binding!("sig ({} bytes): {}", sig.len(), hex::encode(&sig));
                 let js_sig = Uint8Array::new(env, sig.len())?;
                 js_sig.as_mut_slice().copy_from_slice(&sig);
                 Ok(js_sig.into())

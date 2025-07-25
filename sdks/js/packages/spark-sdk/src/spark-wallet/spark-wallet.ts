@@ -95,7 +95,6 @@ import { sha256 } from "@noble/hashes/sha2";
 import { EventEmitter } from "eventemitter3";
 import { isReactNative } from "../constants.js";
 import { Network as NetworkProto, networkToJSON } from "../proto/spark.js";
-import { TokenTransactionWithStatus } from "../proto/spark_token.js";
 import {
   decodeInvoice,
   getNetworkFromInvoice,
@@ -136,6 +135,12 @@ import type {
   TransferParams,
   UserTokenMetadata,
 } from "./types.js";
+import {
+  TokenTransactionWithStatus,
+  TokenMetadata,
+} from "../proto/spark_token.js";
+import { getFetch } from "../utils/fetch.js";
+import { getAbortController } from "../utils/abortController.js";
 
 /**
  * The SparkWallet class is the primary interface for interacting with the Spark network.
@@ -304,6 +309,7 @@ export class SparkWallet extends EventEmitter {
     const INITIAL_DELAY = 1000;
     const MAX_DELAY = 60000;
 
+    const AbortController = getAbortController();
     this.streamController = new AbortController();
 
     const delay = (ms: number, signal?: AbortSignal): Promise<boolean> => {
@@ -1809,8 +1815,9 @@ export class SparkWallet extends EventEmitter {
       });
     }
 
+    const { fetch, Headers } = getFetch();
     const baseUrl = this.config.getElectrsUrl();
-    const headers: Record<string, string> = {};
+    const headers = new Headers();
 
     let txHex: string | undefined;
 
@@ -1823,7 +1830,7 @@ export class SparkWallet extends EventEmitter {
         const auth = btoa(
           `${ELECTRS_CREDENTIALS.username}:${ELECTRS_CREDENTIALS.password}`,
         );
-        headers["Authorization"] = `Basic ${auth}`;
+        headers.set("Authorization", `Basic ${auth}`);
       }
 
       const response = await fetch(`${baseUrl}/tx/${txid}/hex`, {
@@ -1980,8 +1987,9 @@ export class SparkWallet extends EventEmitter {
     }
 
     const nodes = await mutex.runExclusive(async () => {
+      const { fetch, Headers } = getFetch();
       const baseUrl = this.config.getElectrsUrl();
-      const headers: Record<string, string> = {};
+      const headers = new Headers();
 
       let txHex: string | undefined;
 
@@ -1994,7 +2002,7 @@ export class SparkWallet extends EventEmitter {
           const auth = btoa(
             `${ELECTRS_CREDENTIALS.username}:${ELECTRS_CREDENTIALS.password}`,
           );
-          headers["Authorization"] = `Basic ${auth}`;
+          headers.set("Authorization", `Basic ${auth}`);
         }
 
         const response = await fetch(`${baseUrl}/tx/${txid}/hex`, {

@@ -256,6 +256,11 @@ typedef void (*UniffiForeignFutureCompleteVoid)(uint64_t, UniffiForeignFutureStr
 RustBuffer uniffi_spark_frost_fn_func_aggregate_frost(RustBuffer msg, RustBuffer statechain_commitments, RustBuffer self_commitment, RustBuffer statechain_signatures, RustBuffer self_signature, RustBuffer statechain_public_keys, RustBuffer self_public_key, RustBuffer verifying_key, RustBuffer adaptor_public_key, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SPARK_FROST_FN_FUNC_CONSTRUCT_DIRECT_REFUND_TX
+#define UNIFFI_FFIDEF_UNIFFI_SPARK_FROST_FN_FUNC_CONSTRUCT_DIRECT_REFUND_TX
+RustBuffer uniffi_spark_frost_fn_func_construct_direct_refund_tx(RustBuffer tx, uint32_t vout, RustBuffer pubkey, RustBuffer network, uint16_t locktime, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SPARK_FROST_FN_FUNC_CONSTRUCT_NODE_TX
 #define UNIFFI_FFIDEF_UNIFFI_SPARK_FROST_FN_FUNC_CONSTRUCT_NODE_TX
 RustBuffer uniffi_spark_frost_fn_func_construct_node_tx(RustBuffer tx, uint32_t vout, RustBuffer address, uint16_t locktime, RustCallStatus *_Nonnull out_status
@@ -584,6 +589,12 @@ void ffi_spark_frost_rust_future_complete_void(uint64_t handle, RustCallStatus *
 #ifndef UNIFFI_FFIDEF_UNIFFI_SPARK_FROST_CHECKSUM_FUNC_AGGREGATE_FROST
 #define UNIFFI_FFIDEF_UNIFFI_SPARK_FROST_CHECKSUM_FUNC_AGGREGATE_FROST
 uint16_t uniffi_spark_frost_checksum_func_aggregate_frost(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SPARK_FROST_CHECKSUM_FUNC_CONSTRUCT_DIRECT_REFUND_TX
+#define UNIFFI_FFIDEF_UNIFFI_SPARK_FROST_CHECKSUM_FUNC_CONSTRUCT_DIRECT_REFUND_TX
+uint16_t uniffi_spark_frost_checksum_func_construct_direct_refund_tx(void
     
 );
 #endif

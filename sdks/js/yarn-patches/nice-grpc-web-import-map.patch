@@ -1,0 +1,24 @@
+diff --git a/lib/client/transports/nodeHttp/package.json b/lib/client/transports/nodeHttp/package.json
+index a8ca4a6b7f51783b7e0cd5cdc95861ab04025532..5425cf6700dcd9eaa5aa8eb4a78030346319eca2 100644
+--- a/lib/client/transports/nodeHttp/package.json
++++ b/lib/client/transports/nodeHttp/package.json
+@@ -1,5 +1,19 @@
+ {
+   "main": "index.js",
+   "browser": "browser.js",
++  "imports": {
++    "assert": {
++      "bare": "bare-assert",
++      "default": "assert"
++    },
++    "http": {
++      "bare": "bare-http1",
++      "default": "http"
++    },
++    "https": {
++      "bare": "bare-https",
++      "default": "https"
++    }
++  },
+   "types": "index.d.ts"
+ }

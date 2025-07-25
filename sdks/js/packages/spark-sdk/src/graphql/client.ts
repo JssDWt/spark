@@ -72,6 +72,7 @@ import { LeavesSwapFeeEstimate } from "./queries/LeavesSwapFeeEstimate.js";
 import { LightningSendFeeEstimate } from "./queries/LightningSendFeeEstimate.js";
 import { GetTransfer } from "./queries/Transfer.js";
 import { UserRequest } from "./queries/UserRequest.js";
+import { getFetch } from "../utils/fetch.js";
 
 export interface SspClientOptions {
   baseUrl: string;
@@ -102,8 +103,7 @@ export default class SspClient {
     this.signer = config.signer;
     this.authProvider = new SparkAuthProvider();
 
-    const fetchFunction =
-      typeof window !== "undefined" ? window.fetch.bind(window) : fetch;
+    const { fetch } = getFetch();
     const options = config.sspClientOptions;
 
     this.requester = new Requester(
@@ -114,7 +114,7 @@ export default class SspClient {
       options.baseUrl,
       DefaultCrypto,
       undefined,
-      fetchFunction,
+      fetch as typeof globalThis.fetch,
     );
   }
 

@@ -2,6 +2,7 @@
 /* eslint-disable */
 export const memory: WebAssembly.Memory;
 export const uniffi_spark_frost_checksum_func_aggregate_frost: () => number;
+export const uniffi_spark_frost_checksum_func_construct_direct_refund_tx: () => number;
 export const uniffi_spark_frost_checksum_func_construct_node_tx: () => number;
 export const uniffi_spark_frost_checksum_func_construct_refund_tx: () => number;
 export const uniffi_spark_frost_checksum_func_construct_split_tx: () => number;
@@ -69,6 +70,7 @@ export const ffi_spark_frost_rust_future_cancel_void: (a: bigint) => void;
 export const ffi_spark_frost_rust_future_complete_void: (a: bigint, b: number) => void;
 export const ffi_spark_frost_rust_future_free_void: (a: bigint) => void;
 export const uniffi_spark_frost_fn_func_aggregate_frost: (a: number, b: bigint, c: bigint, d: number, e: number, f: bigint, g: bigint, h: number, i: number, j: bigint, k: bigint, l: number, m: number, n: bigint, o: bigint, p: number, q: number, r: bigint, s: bigint, t: number, u: number, v: bigint, w: bigint, x: number, y: number, z: bigint, a1: bigint, b1: number, c1: number, d1: bigint, e1: bigint, f1: number, g1: number, h1: bigint, i1: bigint, j1: number, k1: number, l1: number) => void;
+export const uniffi_spark_frost_fn_func_construct_direct_refund_tx: (a: number, b: bigint, c: bigint, d: number, e: number, f: number, g: bigint, h: bigint, i: number, j: number, k: bigint, l: bigint, m: number, n: number, o: number, p: number) => void;
 export const uniffi_spark_frost_fn_func_construct_node_tx: (a: number, b: bigint, c: bigint, d: number, e: number, f: number, g: bigint, h: bigint, i: number, j: number, k: number, l: number) => void;
 export const uniffi_spark_frost_fn_func_construct_refund_tx: (a: number, b: bigint, c: bigint, d: number, e: number, f: number, g: bigint, h: bigint, i: number, j: number, k: bigint, l: bigint, m: number, n: number, o: number, p: number) => void;
 export const uniffi_spark_frost_fn_func_construct_split_tx: (a: number, b: bigint, c: bigint, d: number, e: number, f: number, g: bigint, h: bigint, i: number, j: number, k: number, l: number) => void;
@@ -98,6 +100,7 @@ export const __wbg_transactionresult_free: (a: number, b: number) => void;
 export const construct_node_tx: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number];
 export const construct_refund_tx: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number, number];
 export const construct_split_tx: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number];
+export const construct_direct_refund_tx: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number, number];
 export const __wbg_dummytx_free: (a: number, b: number) => void;
 export const __wbg_get_dummytx_tx: (a: number) => [number, number];
 export const __wbg_set_dummytx_tx: (a: number, b: number, c: number) => void;
