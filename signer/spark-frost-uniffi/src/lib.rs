@@ -252,29 +252,24 @@ pub fn aggregate_frost(
     adaptor_public_key: Option<Vec<u8>>,
 ) -> Result<Vec<u8>, Error> {
     log_to_file("Entering aggregate_frost");
-    let request = spark_frost::proto::frost::AggregateFrostRequest {
-        message: msg,
-        commitments: statechain_commitments
-            .into_iter()
-            .map(|(k, v)| (k, v.into()))
-            .collect(),
-        user_commitments: Some(self_commitment.into()),
-        user_public_key: self_public_key.clone(),
-        signature_shares: statechain_signatures
-            .into_iter()
-            .map(|(k, v)| (k, v.clone()))
-            .collect(),
-        public_shares: statechain_public_keys
-            .into_iter()
-            .map(|(k, v)| (k, v.clone()))
-            .collect(),
-        verifying_key: verifying_key.clone(),
-        user_signature_share: self_signature.clone(),
-        adaptor_public_key: adaptor_public_key.unwrap_or_default(),
-    };
-    let response =
-        spark_frost::signing::aggregate_frost(&request).map_err(|e| Error::Spark(e.to_string()))?; // Convert the error to String first
-    Ok(response.signature)
+
+    let commitments_proto: HashMap<_, _> = statechain_commitments
+        .into_iter()
+        .map(|(k, v)| (k, v.into()))
+        .collect();
+
+    spark_frost::bridge::aggregate_frost(
+        msg,
+        commitments_proto,
+        self_commitment.into(),
+        statechain_signatures,
+        self_signature,
+        statechain_public_keys,
+        self_public_key,
+        verifying_key,
+        adaptor_public_key,
+    )
+    .map_err(Error::Spark)
 }
 
 pub fn validate_signature_share(

@@ -10,6 +10,7 @@
     "build": "turbo run build",
     "build:packages": "turbo run build --filter='./packages/*'",
     "checks": "yarn deps:check && turbo run lint format test circular-deps package:checks",
+    "postinstall": "./postinstall.sh",
     "circular-deps": "turbo run circular-deps",
     "clean": "turbo run clean",
     "clean-all": "./clean-all.sh",
@@ -42,5 +43,9 @@
     "ts-prune": "^0.10.3",
     "turbo": "^2.4.4"
   },
-  "packageManager": "yarn@4.9.2"
+  "packageManager": "yarn@4.9.2",
+  "dependencies": {
+    "bare-make": "^1.5.1",
+    "cmake-bare": "^1.6.5"
+  }
 }

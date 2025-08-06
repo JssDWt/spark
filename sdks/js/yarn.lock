@@ -1704,7 +1704,7 @@ __metadata:
     "@bitcoinerlab/secp256k1": "npm:^1.1.1"
     "@jest/globals": "npm:^29.7.0"
     "@noble/curves": "npm:^1.8.0"
-    "@noble/hashes": "patch:@noble/hashes@^1.7.0#~/yarn-patches/noble-hashes-import-map.patch"
+    "@noble/hashes": "npm:^1.7.0"
     "@sapphire/utilities": "npm:^3.17.0"
     "@scure/bip32": "npm:^1.6.2"
     "@scure/bip39": "npm:^1.5.4"
@@ -1786,6 +1786,7 @@ __metadata:
   resolution: "@buildonspark/spark-bare-app@workspace:examples/spark-bare-app"
   dependencies:
     "@buildonspark/spark-sdk": "npm:^0.2.2"
+    bare-node-perf-hooks: "npm:^1.0.0"
   languageName: unknown
   linkType: soft
 
@@ -1896,7 +1897,7 @@ __metadata:
     "@jest/globals": "npm:^29.7.0"
     "@lightsparkdev/core": "npm:^1.4.3"
     "@noble/curves": "npm:^1.8.0"
-    "@noble/hashes": "patch:@noble/hashes@^1.7.0#~/yarn-patches/noble-hashes-import-map.patch"
+    "@noble/hashes": "npm:^1.7.0"
     "@opentelemetry/api": "npm:^1.9.0"
     "@opentelemetry/context-async-hooks": "npm:^2.0.0"
     "@opentelemetry/core": "npm:^2.0.0"
@@ -1921,6 +1922,10 @@ __metadata:
     bare-fetch: "npm:^2.4.1"
     bare-http1: "npm:^4.0.2"
     bare-https: "npm:^2.0.0"
+    bare-os: "npm:^3.6.1"
+    bare-performance: "npm:^1.0.0"
+    bare-process: "npm:^4.2.1"
+    bare-utils: "npm:^1.3.0"
     bare-ws: "npm:^2.0.3"
     bitcoinjs-lib: "npm:^6.1.5"
     buffer: "npm:^6.0.3"
@@ -1936,7 +1941,7 @@ __metadata:
     nice-grpc-client-middleware-retry: "npm:^3.1.10"
     nice-grpc-common: "npm:^2.0.2"
     nice-grpc-opentelemetry: "npm:^0.1.18"
-    nice-grpc-web: "patch:nice-grpc-web@^3.3.7#~/yarn-patches/nice-grpc-web-import-map.patch"
+    nice-grpc-web: "npm:^3.3.7"
     node-fetch: "npm:^3.3.2"
     prettier: "npm:^3.5.1"
     publint: "npm:^0.3.9"
@@ -4191,13 +4196,6 @@ __metadata:
   version: 1.8.0
   resolution: "@noble/hashes@npm:1.8.0"
   checksum: 10/474b7f56bc6fb2d5b3a42132561e221b0ea4f91e590f4655312ca13667840896b34195e2b53b7f097ec080a1fdd3b58d902c2a8d0fbdf51d2e238b53808a177e
-  languageName: node
-  linkType: hard
-
-"@noble/hashes@patch:@noble/hashes@^1.7.0#~/yarn-patches/noble-hashes-import-map.patch":
-  version: 1.8.0
-  resolution: "@noble/hashes@patch:@noble/hashes@npm%3A1.8.0#~/yarn-patches/noble-hashes-import-map.patch::version=1.8.0&hash=e3c6f8"
-  checksum: 10/7ff0ffd22f96309f11d677a0cda39a318627afc3ff3b545c5c20458801594cb379ab0af253647237893e4ba4025085d660057c3130f5eda614934bb9f7d9764e
   languageName: node
   linkType: hard
 
@@ -8281,6 +8279,20 @@ __metadata:
   languageName: node
   linkType: hard
 
+"bare-ansi-escapes@npm:^2.1.0":
+  version: 2.2.3
+  resolution: "bare-ansi-escapes@npm:2.2.3"
+  dependencies:
+    bare-stream: "npm:^2.6.5"
+  peerDependencies:
+    bare-buffer: "*"
+  peerDependenciesMeta:
+    bare-buffer:
+      optional: true
+  checksum: 10/2669d3f5a7c6d51a72dba5d5aebe4122b313f4c95774deef37392e928584aa48c2a1d5f9826ecb30b980f42058bddb8bae49d6afd5c74408e91a5189633773db
+  languageName: node
+  linkType: hard
+
 "bare-assert@npm:^1.0.2":
   version: 1.0.2
   resolution: "bare-assert@npm:1.0.2"
@@ -8302,10 +8314,31 @@ __metadata:
   languageName: node
   linkType: hard
 
+"bare-debug-log@npm:^2.0.0":
+  version: 2.0.0
+  resolution: "bare-debug-log@npm:2.0.0"
+  dependencies:
+    bare-os: "npm:^3.0.1"
+  checksum: 10/fe1f58e7e8adf1e546b2ef479bbbaa7607f35ef6c1f7cd5d1825af68799baf96582c98c6aa277131843d34ddcfbb80b3d46182c1eb0e38a2a6e445a568f7aab0
+  languageName: node
+  linkType: hard
+
 "bare-dns@npm:^2.0.4":
   version: 2.1.2
   resolution: "bare-dns@npm:2.1.2"
   checksum: 10/d3caf8b56ff9078773c4be9fa152144743431fcdb70db8c11a62a5d67a674df5fbfa41a9824deb2a6f16952db4294aad72bb8935972369f8f1d578908a5dd62c
+  languageName: node
+  linkType: hard
+
+"bare-encoding@npm:^1.0.0":
+  version: 1.0.0
+  resolution: "bare-encoding@npm:1.0.0"
+  peerDependencies:
+    bare-buffer: "*"
+  peerDependenciesMeta:
+    bare-buffer:
+      optional: true
+  checksum: 10/4960215ae561b23d541f0b14e97bcd64682c8f72c050b1ed91b3e16c36757da76d05302c12603602c75b909b90f919525afe7c39e55f5316ac96b3b858184ecb
   languageName: node
   linkType: hard
 
@@ -8354,6 +8387,15 @@ __metadata:
   languageName: node
   linkType: hard
 
+"bare-format@npm:^1.0.0":
+  version: 1.0.1
+  resolution: "bare-format@npm:1.0.1"
+  dependencies:
+    bare-inspect: "npm:^3.0.0"
+  checksum: 10/369085a7ddcbe613301ad92be9fa303f13e3af5d40448754d1e3f3ff06a84f919cb4222b39fba1a0d7ca723793527afe48a5cc128e0e19f39fdb5ff34cfedb8f
+  languageName: node
+  linkType: hard
+
 "bare-fs@npm:^4.0.0":
   version: 4.1.6
   resolution: "bare-fs@npm:4.1.6"
@@ -8399,6 +8441,16 @@ __metadata:
   languageName: node
   linkType: hard
 
+"bare-inspect@npm:^3.0.0":
+  version: 3.1.1
+  resolution: "bare-inspect@npm:3.1.1"
+  dependencies:
+    bare-ansi-escapes: "npm:^2.1.0"
+    bare-type: "npm:^1.0.0"
+  checksum: 10/538e6fac2b67f3bfadcc2e6c0ce8533d8a6f08b4c8f3ee7e930f7d28d8cfae3a7b0392ac67773f48d948b00a0adcc91b21a9fc7db2653d2d774661480c217b18
+  languageName: node
+  linkType: hard
+
 "bare-link@npm:^1.0.1":
   version: 1.4.1
   resolution: "bare-link@npm:1.4.1"
@@ -8415,6 +8467,29 @@ __metadata:
   bin:
     bare-link: bin.js
   checksum: 10/fe286c851e82a378d25f4c140ce9d7366f4a8ec2e61f95542549e4d9cef0636152dfb98f9b51f80640d2a59b6ec7a9723d379bc8720d1c1c34cb2699f244ffa6
+  languageName: node
+  linkType: hard
+
+"bare-make@npm:^1.5.1":
+  version: 1.5.1
+  resolution: "bare-make@npm:1.5.1"
+  dependencies:
+    bare-env: "npm:^3.0.0"
+    bare-os: "npm:^3.2.0"
+    bare-path: "npm:^3.0.0"
+    bare-process: "npm:^4.0.0"
+    cmake-runtime: "npm:^4.0.2"
+    cmake-toolchains: "npm:^1.0.1"
+    ninja-runtime: "npm:^1.12.2-0"
+    paparam: "npm:^1.5.0"
+  peerDependencies:
+    bare-pipe: "*"
+  peerDependenciesMeta:
+    bare-pipe:
+      optional: true
+  bin:
+    bare-make: bin.js
+  checksum: 10/d786b920b04cb17dd65de37d1c3898d042107f1c94a0930a655bcc6dfd771268a2b399f71d927989262f29448fd38cd7aac2aca68e074e834db9afe2fe4e67c1
   languageName: node
   linkType: hard
 
@@ -8444,7 +8519,16 @@ __metadata:
   languageName: node
   linkType: hard
 
-"bare-os@npm:^3.0.1, bare-os@npm:^3.2.0, bare-os@npm:^3.3.1, bare-os@npm:^3.5.0":
+"bare-node-perf-hooks@npm:^1.0.0":
+  version: 1.0.0
+  resolution: "bare-node-perf-hooks@npm:1.0.0"
+  dependencies:
+    bare-performance: "npm:*"
+  checksum: 10/c54919226242427b4fe114c6fa488c84a64551d6796888c2d4815f6361da62ab4388d238e20a50f1282d4fd4dd57b72ea98132a803a34b49019560d9345bc145
+  languageName: node
+  linkType: hard
+
+"bare-os@npm:^3.0.1, bare-os@npm:^3.2.0, bare-os@npm:^3.3.1, bare-os@npm:^3.5.0, bare-os@npm:^3.6.1":
   version: 3.6.1
   resolution: "bare-os@npm:3.6.1"
   checksum: 10/285d95c391250166128e64da2947f4a348ae127de680afffec1f6c82445856be0d1f259672b471afe06517e4cd3831183c373a1d63ef7799ed4aaa1321b86b67
@@ -8460,6 +8544,13 @@ __metadata:
   languageName: node
   linkType: hard
 
+"bare-performance@npm:*, bare-performance@npm:^1.0.0":
+  version: 1.0.0
+  resolution: "bare-performance@npm:1.0.0"
+  checksum: 10/272e4d711e33f03dedc4fcf3403803a24a5389ee9b208ca30b78e2bc75efc8d4ff2fed588f5b893c0c235cf3f88eeac608d4e3f51de45bd305052409fdff64e7
+  languageName: node
+  linkType: hard
+
 "bare-pipe@npm:^4.0.0":
   version: 4.0.6
   resolution: "bare-pipe@npm:4.0.6"
@@ -8470,7 +8561,7 @@ __metadata:
   languageName: node
   linkType: hard
 
-"bare-process@npm:^4.0.0":
+"bare-process@npm:^4.0.0, bare-process@npm:^4.2.1":
   version: 4.2.1
   resolution: "bare-process@npm:4.2.1"
   dependencies:
@@ -8519,7 +8610,7 @@ __metadata:
   languageName: node
   linkType: hard
 
-"bare-subprocess@npm:^5.0.2":
+"bare-subprocess@npm:^5.0.0, bare-subprocess@npm:^5.0.2":
   version: 5.1.0
   resolution: "bare-subprocess@npm:5.1.0"
   dependencies:
@@ -8568,12 +8659,31 @@ __metadata:
   languageName: node
   linkType: hard
 
+"bare-type@npm:^1.0.0":
+  version: 1.0.6
+  resolution: "bare-type@npm:1.0.6"
+  checksum: 10/74330f5f236fae2349c0ede1a49d3e6484303f8c73a6b71854f02f9d5f2fbfb7a6a8b73d2204e2a02e86aab244049f3959033b5ec9ea916610226d8501f003a0
+  languageName: node
+  linkType: hard
+
 "bare-url@npm:^2.0.9, bare-url@npm:^2.1.0":
   version: 2.1.6
   resolution: "bare-url@npm:2.1.6"
   dependencies:
     bare-path: "npm:^3.0.0"
   checksum: 10/5679ffc833addcc03b05ee7bccff80042d8bf89ca06f624f5b09cdc77de8d558e986357ebb2368418d3ff76296c39da69ad03613fb2d3704f2afc69983fbd682
+  languageName: node
+  linkType: hard
+
+"bare-utils@npm:^1.3.0":
+  version: 1.3.0
+  resolution: "bare-utils@npm:1.3.0"
+  dependencies:
+    bare-debug-log: "npm:^2.0.0"
+    bare-encoding: "npm:^1.0.0"
+    bare-format: "npm:^1.0.0"
+    bare-inspect: "npm:^3.0.0"
+  checksum: 10/2ed6ef3e3a389678eacb06a11eb56625d2b4d165367985e802f86ae1e47840e9936a741e6859daf2cbf9680ad96d82d048f7cc80f2b14553ec5bca45ce2292bb
   languageName: node
   linkType: hard
 
@@ -9475,6 +9585,118 @@ __metadata:
   version: 1.1.0
   resolution: "cmake-npm@npm:1.1.0"
   checksum: 10/f76a61bc287cef7fefa8faff2cdc4961f04685419a7743e6023a3adb38cdaa2c71505b6d5d3918b9f868e4c53f3feec3107fdb3a214bae6b24f401774ed87f28
+  languageName: node
+  linkType: hard
+
+"cmake-runtime-darwin-universal@npm:4.0.2":
+  version: 4.0.2
+  resolution: "cmake-runtime-darwin-universal@npm:4.0.2"
+  dependencies:
+    require-asset: "npm:^1.0.2"
+  bin:
+    ccmake: bin/ccmake
+    cmake: bin/cmake
+    cpack: bin/cpack
+    ctest: bin/ctest
+  conditions: os=darwin & (cpu=arm64 | cpu=x64)
+  languageName: node
+  linkType: hard
+
+"cmake-runtime-linux-arm64@npm:4.0.2":
+  version: 4.0.2
+  resolution: "cmake-runtime-linux-arm64@npm:4.0.2"
+  dependencies:
+    require-asset: "npm:^1.0.2"
+  bin:
+    ccmake: bin/ccmake
+    cmake: bin/cmake
+    cpack: bin/cpack
+    ctest: bin/ctest
+  conditions: os=linux & cpu=arm64
+  languageName: node
+  linkType: hard
+
+"cmake-runtime-linux-x64@npm:4.0.2":
+  version: 4.0.2
+  resolution: "cmake-runtime-linux-x64@npm:4.0.2"
+  dependencies:
+    require-asset: "npm:^1.0.2"
+  bin:
+    ccmake: bin/ccmake
+    cmake: bin/cmake
+    cpack: bin/cpack
+    ctest: bin/ctest
+  conditions: os=linux & cpu=x64
+  languageName: node
+  linkType: hard
+
+"cmake-runtime-win32-arm64@npm:4.0.2":
+  version: 4.0.2
+  resolution: "cmake-runtime-win32-arm64@npm:4.0.2"
+  dependencies:
+    require-asset: "npm:^1.0.2"
+  bin:
+    cmake: bin/cmake.exe
+    cmcldeps: bin/cmcldeps.exe
+    cpack: bin/cpack.exe
+    ctest: bin/ctest.exe
+  conditions: os=win32 & cpu=arm64
+  languageName: node
+  linkType: hard
+
+"cmake-runtime-win32-x64@npm:4.0.2":
+  version: 4.0.2
+  resolution: "cmake-runtime-win32-x64@npm:4.0.2"
+  dependencies:
+    require-asset: "npm:^1.0.2"
+  bin:
+    cmake: bin/cmake.exe
+    cmcldeps: bin/cmcldeps.exe
+    cpack: bin/cpack.exe
+    ctest: bin/ctest.exe
+  conditions: os=win32 & cpu=x64
+  languageName: node
+  linkType: hard
+
+"cmake-runtime@npm:^4.0.2":
+  version: 4.0.2
+  resolution: "cmake-runtime@npm:4.0.2"
+  dependencies:
+    bare-os: "npm:^3.0.1"
+    bare-path: "npm:^3.0.0"
+    bare-subprocess: "npm:^5.0.0"
+    cmake-runtime-darwin-universal: "npm:4.0.2"
+    cmake-runtime-linux-arm64: "npm:4.0.2"
+    cmake-runtime-linux-x64: "npm:4.0.2"
+    cmake-runtime-win32-arm64: "npm:4.0.2"
+    cmake-runtime-win32-x64: "npm:4.0.2"
+  dependenciesMeta:
+    cmake-runtime-darwin-universal:
+      optional: true
+    cmake-runtime-linux-arm64:
+      optional: true
+    cmake-runtime-linux-x64:
+      optional: true
+    cmake-runtime-win32-arm64:
+      optional: true
+    cmake-runtime-win32-x64:
+      optional: true
+  bin:
+    ccmake: bin/ccmake
+    cmake: bin/cmake
+    cmcldeps: bin/cmcldeps
+    cpack: bin/cpack
+    ctest: bin/ctest
+  checksum: 10/48ebfe040c7f1dfc8803a5c85498d97b288d06dcb4095f4bb01c115796166c6e7243ec3ecd0eada82d99a16940c8b657a9eff0c746c55a6fb7cd2f4baaf23a13
+  languageName: node
+  linkType: hard
+
+"cmake-toolchains@npm:^1.0.1":
+  version: 1.8.1
+  resolution: "cmake-toolchains@npm:1.8.1"
+  dependencies:
+    require-asset: "npm:^1.0.2"
+  checksum: 10/298e2ce910c8b3ae04bce29c6eb5d9373cba9fb4f9fdbf66450f7b64c467e47f2c54913b7e340e5fa24728abd6d60344fc02da93ce86c543e8d096e705e7e7c3
   languageName: node
   linkType: hard
 
@@ -15010,6 +15232,8 @@ __metadata:
     "@changesets/cli": "npm:^2.27.1"
     "@manypkg/cli": "npm:^0.24.0"
     "@octokit/auth-action": "npm:^4.0.1"
+    bare-make: "npm:^1.5.1"
+    cmake-bare: "npm:^1.6.5"
     detox: "npm:^20.39.0"
     octokit: "npm:^4.0.2"
     ts-prune: "npm:^0.10.3"
@@ -16704,18 +16928,6 @@ __metadata:
   languageName: node
   linkType: hard
 
-"nice-grpc-web@patch:nice-grpc-web@^3.3.7#~/yarn-patches/nice-grpc-web-import-map.patch":
-  version: 3.3.7
-  resolution: "nice-grpc-web@patch:nice-grpc-web@npm%3A3.3.7#~/yarn-patches/nice-grpc-web-import-map.patch::version=3.3.7&hash=c7e76c"
-  dependencies:
-    abort-controller-x: "npm:^0.4.0"
-    isomorphic-ws: "npm:^5.0.0"
-    js-base64: "npm:^3.7.2"
-    nice-grpc-common: "npm:^2.0.2"
-  checksum: 10/dc11aa84f48d45cd0752cf788a0b93371a1b1235dcc21cf810a1f4321ebb7a29028a1ccaa3b8aee1046ef648fff35f5bb0dd67f56a86798e2ad5445af647a667
-  languageName: node
-  linkType: hard
-
 "nice-grpc@npm:^2.1.10":
   version: 2.1.12
   resolution: "nice-grpc@npm:2.1.12"
@@ -16724,6 +16936,90 @@ __metadata:
     abort-controller-x: "npm:^0.4.0"
     nice-grpc-common: "npm:^2.0.2"
   checksum: 10/446f56ddc98c71c34e22065a6e6a345bb7a944404a71548b1c17bc4a548402e07e79224eb58ca0d18dbb373b2ca56511590dc339233d1812b8f653e4c000f133
+  languageName: node
+  linkType: hard
+
+"ninja-runtime-darwin-universal@npm:1.12.1":
+  version: 1.12.1
+  resolution: "ninja-runtime-darwin-universal@npm:1.12.1"
+  dependencies:
+    require-asset: "npm:^1.0.2"
+  bin:
+    ninja: bin/ninja
+  conditions: os=darwin & (cpu=arm64 | cpu=x64)
+  languageName: node
+  linkType: hard
+
+"ninja-runtime-linux-arm64@npm:1.12.1":
+  version: 1.12.1
+  resolution: "ninja-runtime-linux-arm64@npm:1.12.1"
+  dependencies:
+    require-asset: "npm:^1.0.2"
+  bin:
+    ninja: bin/ninja
+  conditions: os=linux & cpu=arm64
+  languageName: node
+  linkType: hard
+
+"ninja-runtime-linux-x64@npm:1.12.1":
+  version: 1.12.1
+  resolution: "ninja-runtime-linux-x64@npm:1.12.1"
+  dependencies:
+    require-asset: "npm:^1.0.2"
+  bin:
+    ninja: bin/ninja
+  conditions: os=linux & cpu=x64
+  languageName: node
+  linkType: hard
+
+"ninja-runtime-win32-arm64@npm:1.12.1":
+  version: 1.12.1
+  resolution: "ninja-runtime-win32-arm64@npm:1.12.1"
+  dependencies:
+    require-asset: "npm:^1.0.2"
+  bin:
+    ninja: bin/ninja.exe
+  conditions: os=win32 & cpu=arm64
+  languageName: node
+  linkType: hard
+
+"ninja-runtime-win32-x64@npm:1.12.1":
+  version: 1.12.1
+  resolution: "ninja-runtime-win32-x64@npm:1.12.1"
+  dependencies:
+    require-asset: "npm:^1.0.2"
+  bin:
+    ninja: bin/ninja.exe
+  conditions: os=win32 & cpu=x64
+  languageName: node
+  linkType: hard
+
+"ninja-runtime@npm:^1.12.2-0":
+  version: 1.12.2-1
+  resolution: "ninja-runtime@npm:1.12.2-1"
+  dependencies:
+    bare-os: "npm:^3.0.1"
+    bare-path: "npm:^3.0.0"
+    bare-subprocess: "npm:^5.0.0"
+    ninja-runtime-darwin-universal: "npm:1.12.1"
+    ninja-runtime-linux-arm64: "npm:1.12.1"
+    ninja-runtime-linux-x64: "npm:1.12.1"
+    ninja-runtime-win32-arm64: "npm:1.12.1"
+    ninja-runtime-win32-x64: "npm:1.12.1"
+  dependenciesMeta:
+    ninja-runtime-darwin-universal:
+      optional: true
+    ninja-runtime-linux-arm64:
+      optional: true
+    ninja-runtime-linux-x64:
+      optional: true
+    ninja-runtime-win32-arm64:
+      optional: true
+    ninja-runtime-win32-x64:
+      optional: true
+  bin:
+    ninja: bin/ninja
+  checksum: 10/3f21085eb77541f8a56b1e61efedf23c2dcb08435af4742075e05d5199c4c42d0ad7d075db1aa7d57e7bc7a729356f99938c655392cabbd5e99d4c84e43f64c5
   languageName: node
   linkType: hard
 
@@ -18724,7 +19020,7 @@ __metadata:
   languageName: node
   linkType: hard
 
-"require-asset@npm:^1.1.0":
+"require-asset@npm:^1.0.2, require-asset@npm:^1.1.0":
   version: 1.1.0
   resolution: "require-asset@npm:1.1.0"
   dependencies:

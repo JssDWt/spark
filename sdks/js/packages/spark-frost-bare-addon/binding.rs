@@ -5,7 +5,9 @@ use bare_rust::{
 use spark_frost::bridge::{create_dummy_tx};
 
 use frost_secp256k1_tr::Identifier;
+use hex;
 use std::collections::HashMap;
+use bare_rust::{Array, Value};
 use bare_rust::Number;
 
 macro_rules! log_binding {
@@ -20,6 +22,27 @@ fn js_error(env: &Env, msg: &str) -> Value {
 
 fn js_err(env: &Env, msg: &str) -> Value { js_error(env, msg) }
 
+// Convert JS array of [key, value] pairs into a Rust HashMap using a mapper fn.
+fn js_pairs_to_map<T, F>(env: &Env, arr: &Array, mut mapper: F) -> Result<HashMap<std::string::String, T>, Value>
+where
+    F: FnMut(&Env, &Value) -> Result<T, Value>,
+{
+    let mut map = HashMap::new();
+    for i in 0..arr.len() {
+        let pair_val: Value = arr.get(i)?;
+        let pair_arr: Array = pair_val.into();
+        if pair_arr.len() != 2 {
+            return Err(js_err(env, "pair length must be 2"));
+        }
+        let key_js: String = pair_arr.get(0)?;
+        let key: std::string::String = key_js.into();
+        let val_js: Value = pair_arr.get(1)?;
+        let val_mapped = mapper(env, &val_js)?;
+        map.insert(key, val_mapped);
+    }
+    Ok(map)
+}
+
 // Helper to convert a JS Uint8Array property to Vec<u8>
 fn get_uint8_vec(env: &Env, obj: &Object, name: &str) -> Result<Vec<u8>, Value> {
     let arr: Uint8Array = obj
@@ -28,6 +51,7 @@ fn get_uint8_vec(env: &Env, obj: &Object, name: &str) -> Result<Vec<u8>, Value> 
     Ok(arr.as_slice().to_vec())
 }
 
+// JsCommitment { hiding: Uint8Array, binding: Uint8Array }
 fn js_commitment_to_proto(env: &Env, obj: &Object) -> Result<spark_frost::proto::common::SigningCommitment, Value> {
     let hiding = get_uint8_vec(env, obj, "hiding")?;
     let binding = get_uint8_vec(env, obj, "binding")?;
@@ -137,40 +161,20 @@ pub extern "C" fn bare_addon_exports(
 
         // nonce
         let nonce_obj: Object = info.arg(2).ok_or(js_err(env, "nonce argument missing"))?;
-        let nonce_hiding = get_uint8_vec(env, &nonce_obj, "hiding")?;
-        let nonce_binding = get_uint8_vec(env, &nonce_obj, "binding")?;
+        let nonce_proto = js_commitment_to_proto(env, &nonce_obj)?;
 
-        let nonce_proto = spark_frost::proto::frost::SigningNonce { hiding: nonce_hiding, binding: nonce_binding };
-
-        // self commitment
+        // self commitment: JsCommitment
         let self_commit_obj: Object = info.arg(3).ok_or(js_err(env, "selfCommitment argument missing"))?;
         let self_commit_proto = js_commitment_to_proto(env, &self_commit_obj)?;
 
-        // statechain_commitments map (Array<[id, {hiding,binding}]>)
-        let statechain_commitments_proto: HashMap<std::string::String, spark_frost::proto::common::SigningCommitment> = {
-            let mut map = HashMap::new();
+        // commitments array arg4: [[key, JsCommitment], ...]
+        let commit_arr: Array = info.arg(4).ok_or(js_err(env, "commitments argument missing"))?;
+        let commitments_proto = js_pairs_to_map(env, &commit_arr, |env, val| {
+            let obj: Object = val.clone().into();
+            js_commitment_to_proto(env, &obj)
+        })?;
 
-            if let Some(arr_obj) = info.arg::<Object>(4) {
-                let len_num: Number = arr_obj.get_named_property("length")?;
-                let len: u32 = f64::from(len_num) as u32;
-
-                for i in 0..len {
-                    let pair_obj: Object = arr_obj.get_element(i)?;
-
-                    let id_br: String = pair_obj.get_element(0)?;
-                    let id: std::string::String = id_br.into();
-
-                    let commit_obj: Object = pair_obj.get_element(1)?;
-                    let commit_proto = js_commitment_to_proto(env, &commit_obj)?;
-
-                    map.insert(id.clone(), commit_proto);
-                }
-            }
-
-            map
-        };
-
-        // adaptor public key (optional)
+        // adaptor public key (optional): Uint8Array
         let adaptor_pk: Option<Vec<u8>> = info.arg(5).map(|a: Uint8Array| a.as_slice().to_vec());
 
         match spark_frost::bridge::sign_frost(
@@ -178,7 +182,7 @@ pub extern "C" fn bare_addon_exports(
             kp_proto,
             nonce_proto,
             self_commit_proto,
-            statechain_commitments_proto,
+            commitments_proto,
             adaptor_pk,
         ) {
             Ok(sig) => {
@@ -192,6 +196,73 @@ pub extern "C" fn bare_addon_exports(
     }).unwrap();
 
     exports.set_named_property("signFrost", sign_frost_fn).unwrap();
+
+    // aggregateFrost(msg, statechainCommitments, selfCommitment, statechainSignatures, selfSignature, statechainPublicKeys, selfPublicKey, verifyingKey, adaptorPublicKey)
+    let aggregate_frost_fn = Function::new(&env, |env, info| -> Result<Value, Value> {
+        // msg arg0: Uint8Array
+        let msg_arr: Uint8Array = info.arg(0).ok_or(js_err(env, "msg argument missing"))?;
+
+        // statechainCommitments arg1: [[id, JsCommitment], ...]
+        let comm_arr: Array = info.arg(1).ok_or(js_err(env, "statechainCommitments arg missing"))?;
+        let commitments_proto = js_pairs_to_map(env, &comm_arr, |env, val| {
+            let obj: Object = val.clone().into();
+            js_commitment_to_proto(env, &obj)
+        })?;
+
+        // selfCommitment arg2: JsCommitment
+        let self_commit_obj: Object = info.arg(2).ok_or(js_err(env, "selfCommitment arg missing"))?;
+        let self_commit_proto = js_commitment_to_proto(env, &self_commit_obj)?;
+
+        // statechainSignatures arg3: [[id, Uint8Array], ...]
+        let sig_arr: Array = info.arg(3).ok_or(js_err(env, "statechainSignatures arg missing"))?;
+        let statechain_signatures = js_pairs_to_map(env, &sig_arr, |_env, val| {
+            let ua: Uint8Array = val.clone().into();
+            Ok(ua.as_slice().to_vec())
+        })?;
+
+        // selfSignature arg4: Uint8Array
+        let self_signature: Uint8Array = info.arg(4).ok_or(js_err(env, "selfSignature arg missing"))?;
+        let self_signature_bytes = self_signature.as_slice().to_vec();
+
+        // statechainPublicKeys arg5: [[id, Uint8Array], ...]
+        let pk_arr: Array = info.arg(5).ok_or(js_err(env, "statechainPublicKeys arg missing"))?;
+        let statechain_public_keys = js_pairs_to_map(env, &pk_arr, |_env, val| {
+            let ua: Uint8Array = val.clone().into();
+            Ok(ua.as_slice().to_vec())
+        })?;
+
+        // selfPublicKey arg6: Uint8Array
+        let self_public_key: Uint8Array = info.arg(6).ok_or(js_err(env, "selfPublicKey arg missing"))?;
+        let public_key = self_public_key.as_slice().to_vec();
+
+        // verifyingKey arg7: Uint8Array
+        let verifying_key_arr: Uint8Array = info.arg(7).ok_or(js_err(env, "verifyingKey arg missing"))?;
+        let verifying_key = verifying_key_arr.as_slice().to_vec();
+
+        // adaptorPublicKey arg8: Uint8Array (optional)
+        let adaptor_pk: Option<Vec<u8>> = info.arg(8).map(|a: Uint8Array| a.as_slice().to_vec());
+
+        match spark_frost::bridge::aggregate_frost(
+            msg_arr.as_slice().to_vec(),
+            commitments_proto,
+            self_commit_proto,
+            statechain_signatures,
+            self_signature_bytes,
+            statechain_public_keys,
+            self_public_key,
+            verifying_key,
+            adaptor_pk,
+        ) {
+            Ok(sig) => {
+                let js_sig = Uint8Array::new(env, sig.len())?;
+                js_sig.as_mut_slice().copy_from_slice(&sig);
+                Ok(js_sig.into())
+            }
+            Err(e) => Err(js_err(env, &e)),
+        }
+    }).unwrap();
+
+    exports.set_named_property("aggregateFrost", aggregate_frost_fn).unwrap();
 
     exports.into()
 }

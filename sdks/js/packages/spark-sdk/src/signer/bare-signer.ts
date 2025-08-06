@@ -1,6 +1,6 @@
 import { bytesToHex, hexToBytes } from "@noble/hashes/utils";
 import { ValidationError } from "../errors/index.js";
-import { createDummyTx, signFrost } from "@buildonspark/spark-frost-bare-addon";
+import { createDummyTx, signFrost, aggregateFrost } from "@buildonspark/spark-frost-bare-addon";
 import { IKeyPackage } from "../spark_bindings/types.js";
 import { DefaultSparkSigner } from "./signer.js";
 import { SignFrostParams, AggregateFrostParams } from "./types.js";
@@ -52,26 +52,34 @@ export class BareSparkSigner extends DefaultSparkSigner {
 
   async aggregateFrost({
     message,
+    statechainCommitments,
+    selfCommitment,
+    statechainSignatures,
+    selfSignature,
+    statechainPublicKeys,
     publicKey,
     verifyingKey,
-    selfCommitment,
-    statechainCommitments,
     adaptorPubKey,
-    selfSignature,
-    statechainSignatures,
-    statechainPublicKeys,
   }: AggregateFrostParams): Promise<Uint8Array> {
-    // return NativeSparkFrost.aggregateFrost({
-    //   message,
-    //   statechainSignatures,
-    //   statechainPublicKeys,
-    //   verifyingKey,
-    //   statechainCommitments,
-    //   selfCommitment,
-    //   selfPublicKey: publicKey,
-    //   selfSignature,
-    //   adaptorPubKey,
-    // });
-    return new Uint8Array([]);
+    const statechainCommitmentsArr = statechainCommitments ? Object.entries(statechainCommitments) : [];
+    const statechainSignaturesArr = statechainSignatures
+      ? Object.entries(statechainSignatures)
+      : [];
+    const statechainPublicKeysArr = statechainPublicKeys
+      ? Object.entries(statechainPublicKeys)
+      : [];
+
+    // msg, statechainCommitments, selfCommitment, statechainSignatures, selfSignature, statechainPublicKeys, selfPublicKey, verifyingKey, adaptorPublicKey
+    return aggregateFrost(
+      message,
+      statechainCommitmentsArr,
+      selfCommitment.commitment,
+      statechainSignaturesArr,
+      selfSignature,
+      statechainPublicKeysArr,
+      publicKey,
+      verifyingKey,
+      adaptorPubKey,
+    );
   }
 }

@@ -104,6 +104,7 @@ import {
 import { EventEmitter } from "eventemitter3";
 import { isReactNative } from "../constants.js";
 import { Network as NetworkProto, networkToJSON } from "../proto/spark.js";
+import { TokenTransactionWithStatus } from "../proto/spark_token.js";
 import {
   decodeInvoice,
   getNetworkFromInvoice,
@@ -146,11 +147,6 @@ import type {
   TransferParams,
   UserTokenMetadata,
 } from "./types.js";
-import {
-  TokenTransactionWithStatus,
-  TokenMetadata,
-} from "../proto/spark_token.js";
-import { getFetch } from "../utils/fetch.js";
 import { getAbortController } from "../utils/abortController.js";
 
 /**

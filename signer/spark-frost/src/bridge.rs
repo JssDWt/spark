@@ -110,3 +110,33 @@ pub fn sign_frost(
 
     Ok(result.signature_share)
 }
+
+#[allow(clippy::too_many_arguments)]
+pub fn aggregate_frost(
+    msg: Vec<u8>,
+    statechain_commitments: HashMap<String, proto::common::SigningCommitment>,
+    self_commitment: proto::common::SigningCommitment,
+    statechain_signatures: HashMap<String, Vec<u8>>,
+    self_signature: Vec<u8>,
+    statechain_public_keys: HashMap<String, Vec<u8>>,
+    self_public_key: Vec<u8>,
+    verifying_key: Vec<u8>,
+    adaptor_public_key: Option<Vec<u8>>,
+) -> Result<Vec<u8>, String> {
+    let request = proto::frost::AggregateFrostRequest {
+        message: msg,
+        commitments: statechain_commitments,
+        user_commitments: Some(self_commitment),
+        user_public_key: self_public_key,
+        signature_shares: statechain_signatures,
+        public_shares: statechain_public_keys,
+        verifying_key,
+        user_signature_share: self_signature,
+        adaptor_public_key: adaptor_public_key.unwrap_or_default(),
+    };
+
+    let response = signing::aggregate_frost(&request)
+        .map_err(|e| e.to_string())?;
+
+    Ok(response.signature)
+}

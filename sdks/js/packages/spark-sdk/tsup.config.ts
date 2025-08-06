@@ -56,5 +56,6 @@ export default defineConfig([
     entry: ["src/bare/index.ts"],
     format: ["cjs", "esm"],
     outDir: "dist/bare",
+    onSuccess: "cp src/bare/imports.json dist/bare/imports.json",
   },
 ]);

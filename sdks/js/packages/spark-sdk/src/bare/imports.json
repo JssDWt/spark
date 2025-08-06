@@ -1,0 +1,13 @@
+{
+  "node:fs": "bare-fs",
+  "node:crypto": "bare-crypto",
+  "crypto": "bare-crypto",
+  "ws": "bare-ws",
+  "http": "bare-http1",
+  "https": "bare-https",
+  "assert": "bare-assert",
+  "util": "bare-utils",
+  "perf_hooks": "bare-performance",
+  "process": "bare-process",
+  "os": "bare-os"
+}

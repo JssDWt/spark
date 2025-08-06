@@ -639,7 +639,9 @@ class DefaultSparkSigner implements SparkSigner {
       verifyingKey: verifyingKey,
     };
 
-    return SparkFrost.signFrost({
+    const logMessage = bytesToHex(message);
+
+    console.log("tmp calling SparkFrost.signFrost uint8:", {
       message,
       keyPackage,
       nonce,
@@ -647,6 +649,55 @@ class DefaultSparkSigner implements SparkSigner {
       statechainCommitments,
       adaptorPubKey,
     });
+
+    console.log(
+      "tmp calling SparkFrost.signFrost hex:",
+      JSON.stringify({
+        message: logMessage,
+        keyPackage: {
+          secretKey: bytesToHex(keyPackage.secretKey),
+          publicKey: bytesToHex(keyPackage.publicKey),
+          verifyingKey: bytesToHex(keyPackage.verifyingKey),
+        },
+        nonce: {
+          binding: bytesToHex(nonce.binding),
+          hiding: bytesToHex(nonce.hiding),
+        },
+        selfCommitment: {
+          binding: bytesToHex(commitment.binding),
+          hiding: bytesToHex(commitment.hiding),
+        },
+        statechainCommitments: statechainCommitments
+          ? Object.entries(statechainCommitments).reduce(
+              (acc, [commitment, { binding, hiding }]) => {
+                acc[commitment] = {
+                  binding: bytesToHex(binding),
+                  hiding: bytesToHex(hiding),
+                };
+                return acc;
+              },
+              {} as Record<string, { binding: string; hiding: string }>,
+            )
+          : undefined,
+        adaptorPubKey: adaptorPubKey ? bytesToHex(adaptorPubKey) : null,
+      }),
+    );
+
+    const result = await SparkFrost.signFrost({
+      message,
+      keyPackage,
+      nonce,
+      selfCommitment: commitment,
+      statechainCommitments,
+      adaptorPubKey,
+    });
+
+    console.log(
+      `tmp SparkFrost.signFrost result for message ${logMessage}`,
+      bytesToHex(result),
+    );
+
+    return result;
   }
 
   async aggregateFrost({

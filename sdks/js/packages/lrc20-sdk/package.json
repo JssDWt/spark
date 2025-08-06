@@ -62,7 +62,7 @@
   "dependencies": {
     "@bitcoinerlab/secp256k1": "^1.1.1",
     "@noble/curves": "^1.8.0",
-    "@noble/hashes": "patch:@noble/hashes@^1.7.0#~/yarn-patches/noble-hashes-import-map.patch",
+    "@noble/hashes": "^1.7.0",
     "@sapphire/utilities": "^3.17.0",
     "@scure/bip32": "^1.6.2",
     "@scure/bip39": "^1.5.4",

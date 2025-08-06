@@ -5,6 +5,7 @@ exports.hello = binding.hello
 exports.createDummyTx = binding.createDummyTx
 exports.encryptEcies = binding.encryptEcies
 exports.signFrost = binding.signFrost
+exports.aggregateFrost = binding.aggregateFrost
 
 function hexToUint8Array(hex) {
   if (typeof hex !== 'string') {
@@ -174,4 +175,27 @@ try {
   }
 } catch (e) {
   log('signFrost error:', e.message || e)
+}
+
+console.log('\n');
+
+log('aggregateFrost smoke test (expect error)');
+
+try {
+  binding.aggregateFrost(
+    new Uint8Array([1, 2, 3]),
+    [
+      {
+        secretKey: new Uint8Array([0]),
+        publicKey: new Uint8Array([0]),
+        verifyingKey: new Uint8Array([0])
+      }
+    ],
+    { hiding: new Uint8Array([0]), binding: new Uint8Array([0]) },
+    { hiding: new Uint8Array([0]), binding: new Uint8Array([0]) },
+    {},
+    null
+  )
+} catch (e) {
+  log('aggregateFrost returned error as expected', e.message || e)
 }
