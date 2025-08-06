@@ -10,8 +10,7 @@ import (
 	"slices"
 	"time"
 
-	"github.com/lightsparkdev/spark/so/lrc20"
-	"github.com/lightsparkdev/spark/so/protoconverter"
+	"github.com/lightsparkdev/spark/common/keys"
 
 	tokenpb "github.com/lightsparkdev/spark/proto/spark_token"
 	tokeninternalpb "github.com/lightsparkdev/spark/proto/spark_token_internal"
@@ -30,22 +29,19 @@ import (
 
 type InternalPrepareTokenHandler struct {
 	config           *so.Config
-	lrc20Client      *lrc20.Client
 	enablePreemption bool
 }
 
-func NewInternalPrepareTokenHandler(config *so.Config, client *lrc20.Client) *InternalPrepareTokenHandler {
+func NewInternalPrepareTokenHandler(config *so.Config) *InternalPrepareTokenHandler {
 	return &InternalPrepareTokenHandler{
 		config:           config,
-		lrc20Client:      client,
 		enablePreemption: false,
 	}
 }
 
-func NewInternalPrepareTokenHandlerWithPreemption(config *so.Config, client *lrc20.Client) *InternalPrepareTokenHandler {
+func NewInternalPrepareTokenHandlerWithPreemption(config *so.Config) *InternalPrepareTokenHandler {
 	return &InternalPrepareTokenHandler{
 		config:           config,
-		lrc20Client:      client,
 		enablePreemption: true,
 	}
 }
@@ -143,19 +139,19 @@ func (h *InternalPrepareTokenHandler) PrepareTokenTransactionInternal(ctx contex
 		return nil, fmt.Errorf("token transaction type unknown")
 	}
 
-	sparkTokenTransaction, err := protoconverter.SparkTokenTransactionFromTokenProto(req.FinalTokenTransaction)
-	if err != nil {
-		return nil, tokens.FormatErrorWithTransactionProto("failed to convert token transaction", req.FinalTokenTransaction, err)
-	}
-
-	if !h.config.Token.DisconnectLRC20Node {
-		logger.Info("Verifying token transaction with LRC20 node")
-		err = h.lrc20Client.VerifySparkTx(ctx, sparkTokenTransaction)
-		if err != nil {
-			return nil, tokens.FormatErrorWithTransactionProto("failed to verify token transaction with LRC20 node", req.FinalTokenTransaction, err)
-		}
-		logger.Info("Token transaction verified with LRC20 node")
-	}
+	// TODO: LRC20 client functionality removed
+	// sparkTokenTransaction, err := protoconverter.SparkTokenTransactionFromTokenProto(req.FinalTokenTransaction)
+	// if err != nil {
+	//	return nil, tokens.FormatErrorWithTransactionProto("failed to convert token transaction", req.FinalTokenTransaction, err)
+	// }
+	// if !h.config.Token.DisconnectLRC20Node {
+	//	logger.Info("Verifying token transaction with LRC20 node")
+	//	err = h.lrc20Client.VerifySparkTx(ctx, sparkTokenTransaction)
+	//	if err != nil {
+	//		return nil, tokens.FormatErrorWithTransactionProto("failed to verify token transaction with LRC20 node", req.FinalTokenTransaction, err)
+	//	}
+	//	logger.Info("Token transaction verified with LRC20 node")
+	// }
 	// Save the token transaction, created output ents, and update the outputs to spend.
 	_, err = ent.CreateStartedTransactionEntities(ctx, req.FinalTokenTransaction, req.TokenTransactionSignatures, req.KeyshareIds, inputTtxos, req.CoordinatorPublicKey)
 	if err != nil {
@@ -210,7 +206,7 @@ func (h *InternalPrepareTokenHandler) validateAndReserveKeyshares(ctx context.Co
 
 // validateOperatorSpecificSignatures validates the signatures in the request against the transaction hash
 // and verifies that the number of signatures matches the expected count based on transaction type
-func validateOperatorSpecificSignatures(identityPublicKey []byte, operatorSpecificSignatures []*pb.OperatorSpecificOwnerSignature, tokenTransaction *ent.TokenTransaction) error {
+func validateOperatorSpecificSignatures(identityPublicKey keys.Public, operatorSpecificSignatures []*pb.OperatorSpecificOwnerSignature, tokenTransaction *ent.TokenTransaction) error {
 	if len(tokenTransaction.Edges.SpentOutput) > 0 {
 		return validateTransferOperatorSpecificSignatures(identityPublicKey, operatorSpecificSignatures, tokenTransaction)
 	}
@@ -218,7 +214,7 @@ func validateOperatorSpecificSignatures(identityPublicKey []byte, operatorSpecif
 }
 
 // validateTransferOperatorSpecificSignatures validates signatures for transfer transactions
-func validateTransferOperatorSpecificSignatures(identityPublicKey []byte, operatorSpecificSignatures []*pb.OperatorSpecificOwnerSignature, tokenTransaction *ent.TokenTransaction) error {
+func validateTransferOperatorSpecificSignatures(identityPublicKey keys.Public, operatorSpecificSignatures []*pb.OperatorSpecificOwnerSignature, tokenTransaction *ent.TokenTransaction) error {
 	if len(operatorSpecificSignatures) != len(tokenTransaction.Edges.SpentOutput) {
 		return tokens.FormatErrorWithTransactionEnt(
 			fmt.Sprintf("expected %d signatures for transfer (one per input), but got %d",
@@ -271,9 +267,12 @@ func validateTransferOperatorSpecificSignatures(identityPublicKey []byte, operat
 				sig.Payload.FinalTokenTransactionHash, tokenTransaction.FinalizedTokenTransactionHash)
 		}
 
-		if !bytes.Equal(sig.Payload.OperatorIdentityPublicKey, identityPublicKey) {
-			return fmt.Errorf(tokens.ErrOperatorPublicKeyMismatch,
-				sig.Payload.OperatorIdentityPublicKey, identityPublicKey)
+		payloadPubKey, err := keys.ParsePublicKey(sig.Payload.OperatorIdentityPublicKey)
+		if err != nil {
+			return fmt.Errorf("unable to parse signature payload operator identity public key: %w", err)
+		}
+		if !payloadPubKey.Equals(identityPublicKey) {
+			return fmt.Errorf(tokens.ErrOperatorPublicKeyMismatch, payloadPubKey, identityPublicKey)
 		}
 
 		output := spentOutputs[i]
@@ -290,7 +289,7 @@ func validateTransferOperatorSpecificSignatures(identityPublicKey []byte, operat
 }
 
 // validateIssuerOperatorSpecificSignatures validates signatures for mint and create transactions
-func validateIssuerOperatorSpecificSignatures(identityPublicKey []byte, operatorSpecificSignatures []*pb.OperatorSpecificOwnerSignature, tokenTransaction *ent.TokenTransaction) error {
+func validateIssuerOperatorSpecificSignatures(identityPublicKey keys.Public, operatorSpecificSignatures []*pb.OperatorSpecificOwnerSignature, tokenTransaction *ent.TokenTransaction) error {
 	if len(operatorSpecificSignatures) != 1 {
 		return tokens.FormatErrorWithTransactionEnt(
 			fmt.Sprintf("expected exactly 1 signature for mint/create, but got %d",
@@ -323,9 +322,12 @@ func validateIssuerOperatorSpecificSignatures(identityPublicKey []byte, operator
 	}
 
 	if len(sig.Payload.OperatorIdentityPublicKey) > 0 {
-		if !bytes.Equal(sig.Payload.OperatorIdentityPublicKey, identityPublicKey) {
-			return fmt.Errorf(tokens.ErrOperatorPublicKeyMismatch,
-				sig.Payload.OperatorIdentityPublicKey, identityPublicKey)
+		payloadPubKey, err := keys.ParsePublicKey(sig.Payload.OperatorIdentityPublicKey)
+		if err != nil {
+			return fmt.Errorf("unable to parse signature payload operator identity public key: %w", err)
+		}
+		if !payloadPubKey.Equals(identityPublicKey) {
+			return fmt.Errorf(tokens.ErrOperatorPublicKeyMismatch, payloadPubKey, identityPublicKey)
 		}
 	}
 
@@ -575,7 +577,7 @@ func validateIssuerTokenNotAlreadyCreated(ctx context.Context, tokenTransaction 
 		return tokens.FormatErrorWithTransactionProto("failed to search for existing token create entity", tokenTransaction, err)
 	}
 	if existingTokenCreateMetadata != nil {
-		return tokens.FormatErrorWithTransactionProto("token already created for this issuer", tokenTransaction, fmt.Errorf("a token with this identifier has already been created"))
+		return tokens.NewTokenAlreadyCreatedError(tokenTransaction)
 	}
 	return nil
 }

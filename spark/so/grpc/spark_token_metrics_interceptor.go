@@ -40,9 +40,13 @@ func SparkTokenMetricsInterceptor() grpc.UnaryServerInterceptor {
 	)
 
 	sparkTokenTxDuration, _ := meter.Float64Histogram(
-		"spark_token_transaction_duration_seconds",
+		"spark_token_transaction_duration_milliseconds",
 		metric.WithDescription("Duration of Spark token transaction RPCs"),
-		metric.WithUnit("s"),
+		metric.WithUnit("ms"),
+		metric.WithExplicitBucketBoundaries(
+			// Standard gRPC latency buckets in milliseconds
+			1, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000, 25000, 50000, 100000,
+		),
 	)
 
 	return func(ctx context.Context, req interface{}, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (interface{}, error) {
@@ -57,11 +61,8 @@ func SparkTokenMetricsInterceptor() grpc.UnaryServerInterceptor {
 
 		startTime := time.Now()
 		resp, err := handler(ctx, req)
-		duration := time.Since(startTime).Seconds()
-
-		if err != nil {
-			attrs = append(attrs, attribute.String("grpc_code", status.Code(err).String()))
-		}
+		duration := time.Since(startTime).Seconds() * 1000
+		attrs = append(attrs, attribute.String("grpc_code", status.Code(err).String()))
 
 		sparkTokenTxHandledTotal.Add(ctx, 1, metric.WithAttributes(attrs...))
 		sparkTokenTxDuration.Record(ctx, duration, metric.WithAttributes(attrs...))
@@ -71,10 +72,11 @@ func SparkTokenMetricsInterceptor() grpc.UnaryServerInterceptor {
 }
 
 // getSparkTokenAttributes returns the attributes for Spark token metrics
-func getSparkTokenAttributes(method string, txType string) []attribute.KeyValue {
+func getSparkTokenAttributes(fullMethod string, txType string) []attribute.KeyValue {
+	serviceName, methodName := extractServiceAndMethod(fullMethod)
 	attrs := []attribute.KeyValue{
-		attribute.String("grpc_method", method),
-		attribute.String("grpc_service", extractServiceName(method)),
+		attribute.String("rpc_method", methodName),
+		attribute.String("rpc_service", serviceName),
 		attribute.String("token_transaction_type", txType),
 	}
 
@@ -130,10 +132,10 @@ func extractTransactionType(req interface{}) string {
 	return "UNKNOWN"
 }
 
-func extractServiceName(method string) string {
-	parts := strings.Split(method, "/")
-	if len(parts) >= 2 {
-		return parts[1]
+func extractServiceAndMethod(fullMethod string) (string, string) {
+	parts := strings.Split(fullMethod, "/")
+	if len(parts) >= 3 {
+		return parts[1], parts[2]
 	}
-	return "unknown"
+	return "unknown", "unknown"
 }

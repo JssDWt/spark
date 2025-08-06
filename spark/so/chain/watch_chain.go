@@ -29,7 +29,6 @@ import (
 	"github.com/lightsparkdev/spark/so/ent/signingkeyshare"
 	"github.com/lightsparkdev/spark/so/ent/treenode"
 	"github.com/lightsparkdev/spark/so/helper"
-	"github.com/lightsparkdev/spark/so/lrc20"
 	events "github.com/lightsparkdev/spark/so/stream"
 	"github.com/lightsparkdev/spark/so/watchtower"
 	"go.opentelemetry.io/otel"
@@ -170,7 +169,6 @@ func scanChainUpdates(
 	config *so.Config,
 	dbClient *ent.Client,
 	bitcoinClient *rpcclient.Client,
-	lrc20Client *lrc20.Client,
 	network common.Network,
 ) error {
 	logger := logging.GetLoggerFromContext(ctx)
@@ -223,7 +221,6 @@ func scanChainUpdates(
 		config,
 		dbClient,
 		bitcoinClient,
-		lrc20Client,
 		difference.Connected,
 		network,
 	)
@@ -249,7 +246,6 @@ func WatchChain(
 	ctx context.Context,
 	config *so.Config,
 	dbClient *ent.Client,
-	lrc20Client *lrc20.Client,
 	bitcoindConfig so.BitcoindConfig,
 ) error {
 	logger := logging.GetLoggerFromContext(ctx)
@@ -264,7 +260,7 @@ func WatchChain(
 		return err
 	}
 
-	err = scanChainUpdates(ctx, config, dbClient, bitcoinClient, lrc20Client, network)
+	err = scanChainUpdates(ctx, config, dbClient, bitcoinClient, network)
 	if err != nil {
 		logger.Error("failed to scan chain updates", "error", err)
 	}
@@ -302,7 +298,7 @@ func WatchChain(
 		// we need to query bitcoind for the height anyway. We just
 		// treat it as a notification that a new block appeared.
 
-		err = scanChainUpdates(ctx, config, dbClient, bitcoinClient, lrc20Client, network)
+		err = scanChainUpdates(ctx, config, dbClient, bitcoinClient, network)
 		if err != nil {
 			logger.Error("Failed to scan chain updates", "error", err)
 		}
@@ -319,7 +315,6 @@ func connectBlocks(
 	config *so.Config,
 	dbClient *ent.Client,
 	bitcoinClient *rpcclient.Client,
-	lrc20Client *lrc20.Client,
 	chainTips []Tip,
 	network common.Network,
 ) error {
@@ -350,12 +345,10 @@ func connectBlocks(
 		err = handleBlock(
 			ctx,
 			config,
-			lrc20Client,
 			dbTx,
 			bitcoinClient,
 			txs,
 			chainTip.Height,
-			blockHash,
 			network,
 		)
 		if err != nil {
@@ -431,12 +424,10 @@ func processTransactions(txs []wire.MsgTx, networkParams *chaincfg.Params) (map[
 func handleBlock(
 	ctx context.Context,
 	config *so.Config,
-	lrc20Client *lrc20.Client,
 	dbTx *ent.Tx,
 	bitcoinClient *rpcclient.Client,
 	txs []wire.MsgTx,
 	blockHeight int64,
-	blockHash *chainhash.Hash,
 	network common.Network,
 ) error {
 	logger := logging.GetLoggerFromContext(ctx)
@@ -451,7 +442,7 @@ func handleBlock(
 	if err != nil {
 		return err
 	}
-	handleTokenUpdatesForBlock(ctx, config, lrc20Client, dbTx, txs, blockHeight, blockHash, network)
+	handleTokenUpdatesForBlock(ctx, config, dbTx, txs, blockHeight, network)
 
 	confirmedTxHashSet, creditedAddresses, addressToUtxoMap, err := processTransactions(txs, networkParams)
 	if err != nil {
@@ -467,31 +458,8 @@ func handleBlock(
 
 	if processNodesForWatchtowers {
 		logger.Info("Started processing nodes for watchtowers", "height", blockHeight)
-		// Fetch nodes with a confirmed parent and unconfirmed node/refund TX
-		nodes, err := dbTx.TreeNode.Query().
-			Where(
-				treenode.Or(
-					// Root nodes that need node confirmation or refund confirmation
-					treenode.And(
-						treenode.Not(treenode.HasParent()),
-						treenode.Or(
-							treenode.NodeConfirmationHeightIsNil(),
-							treenode.RefundConfirmationHeightIsNil(),
-						),
-					),
-					// Child nodes with confirmed parent that need node confirmation
-					treenode.And(
-						treenode.HasParentWith(treenode.NodeConfirmationHeightNotNil()),
-						treenode.NodeConfirmationHeightIsNil(),
-					),
-					// Nodes with confirmed node tx and refund tx that need refund confirmation
-					treenode.And(
-						treenode.NodeConfirmationHeightNotNil(),
-						treenode.RefundConfirmationHeightIsNil(),
-					),
-				),
-			).
-			All(ctx)
+		// Fetch only nodes that could have expired timelocks
+		nodes, err := watchtower.QueryNodesWithExpiredTimeLocks(ctx, dbTx, blockHeight, network)
 		if err != nil {
 			return fmt.Errorf("failed to query nodes: %w", err)
 		}
@@ -737,6 +705,14 @@ func handleBlock(
 				continue
 			}
 			if len(treeNode.RawRefundTx) > 0 {
+				tx, err := common.TxFromRawTxBytes(treeNode.RawRefundTx)
+				if err != nil {
+					return err
+				}
+				if !tx.HasWitness() {
+					logger.Debug("Tree node has not been signed", "node", treeNode.ID)
+					continue
+				}
 				_, err = dbTx.TreeNode.UpdateOne(treeNode).
 					SetStatus(st.TreeNodeStatusAvailable).
 					Save(ctx)
@@ -770,14 +746,6 @@ func handleBlock(
 		}
 	}
 
-	logger.Info("Checking for withdrawn token leaves in block", "height", blockHeight)
-
-	// Use the lrc20 client to sync withdrawn leaves - it will handle all the processing internally
-	err = lrc20Client.MarkWithdrawnTokenOutputs(ctx, network, dbTx, blockHash)
-	if err != nil {
-		logger.Error("Failed to sync withdrawn leaves", "error", err)
-		return err
-	}
 	logger.Info("Finished handling block", "height", blockHeight)
 	blockHeightProcessingTimeHistogram.Record(ctx, int64(time.Since(start).Milliseconds()), metric.WithAttributes(
 		attribute.String("network", network.String()),

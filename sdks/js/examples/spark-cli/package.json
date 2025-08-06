@@ -1,12 +1,13 @@
 {
   "name": "@buildonspark/spark-cli",
-  "version": "0.0.60",
+  "version": "0.0.63",
   "private": true,
   "description": "Spark CLI",
   "main": "index.js",
   "scripts": {
     "cli": "cross-env NODE_ENV=production NETWORK=regtest tsx src/cli.ts",
     "cli:local": "cross-env NODE_ENV=development NETWORK=local tsx src/cli.ts",
+    "cli:minikube": "cross-env NODE_ENV=developent NETWORK=local HERMETIC_TEST=true tsx src/cli.ts",
     "cli:mainnet": "cross-env NODE_ENV=production NETWORK=mainnet tsx src/cli.ts",
     "cli:dev": "cross-env NODE_ENV=development NETWORK=regtest CONFIG_FILE=config/dev-regtest-config.json tsx src/cli.ts",
     "cli:dev:mainnet": "cross-env NODE_ENV=development NETWORK=mainnet CONFIG_FILE=config/dev-mainnet-config.json tsx src/cli.ts",
@@ -27,8 +28,8 @@
     "typescript": "^5.7.3"
   },
   "dependencies": {
-    "@buildonspark/issuer-sdk": "^0.0.82",
-    "@buildonspark/spark-sdk": "^0.2.3",
+    "@buildonspark/issuer-sdk": "^0.0.85",
+    "@buildonspark/spark-sdk": "^0.2.6",
     "tsx": "^4.19.3",
     "yargs": "^18.0.0"
   },

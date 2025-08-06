@@ -10,6 +10,7 @@ import {
   ConfigOptions,
   WalletConfig,
   SigningOperator,
+  ConsoleOptions,
 } from "./wallet-config.js";
 import { ConfigurationError } from "../errors/types.js";
 
@@ -47,7 +48,7 @@ export class WalletConfigService
 
   public getCoordinatorAddress(): string {
     const coordinator =
-      this.config.signingOperators[this.config.coodinatorIdentifier];
+      this.config.signingOperators[this.config.coordinatorIdentifier];
     if (!coordinator) {
       throw new ConfigurationError(
         "Coordinator not found in signing operators",
@@ -72,7 +73,7 @@ export class WalletConfigService
   }
 
   public getCoordinatorIdentifier(): string {
-    return this.config.coodinatorIdentifier;
+    return this.config.coordinatorIdentifier;
   }
 
   public getExpectedWithdrawBondSats(): number {
@@ -124,7 +125,17 @@ export class WalletConfigService
     return this.config.electrsUrl;
   }
 
+  public getSspBaseUrl(): string {
+    return this.config.sspClientOptions.baseUrl;
+  }
+
   public getSspIdentityPublicKey(): string {
     return this.config.sspClientOptions.identityPublicKey;
+  }
+
+  public getConsoleOptions(): ConsoleOptions {
+    return {
+      ...this.config.console,
+    };
   }
 }

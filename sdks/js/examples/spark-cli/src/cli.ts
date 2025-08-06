@@ -3,6 +3,8 @@ import {
   Bech32mTokenIdentifier,
   ConfigOptions,
   constructUnilateralExitFeeBumpPackages,
+  decodeBech32mTokenIdentifier,
+  getNetworkFromBech32mTokenIdentifier,
   decodeSparkAddress,
   encodeBech32mTokenIdentifier,
   encodeSparkAddress,
@@ -302,6 +304,8 @@ const commands = [
   "claimstaticdepositquote",
   "claimstaticdeposit",
   "refundstaticdeposit",
+  "refundstaticdepositlegacy",
+  "claimstaticdepositwithmaxfee",
   "createpaymentintent",
   "createinvoice",
   "payinvoice",
@@ -330,6 +334,7 @@ const commands = [
   "querytokentransactions",
   "gettransferfromssp",
   "gettransfer",
+  "encodeaddress",
 
   "unilateralexit",
   "generatefeebumppackagetobroadcast",
@@ -340,7 +345,6 @@ const commands = [
   "leafidtohex",
   "testonly_generateutxostring",
   "testonly_expiretimelock",
-  "testonly_expiretimelockrefundtx",
 
   "help",
   "exit",
@@ -540,16 +544,19 @@ async function runCLI() {
   getstaticdepositaddress                                             - Get a static address to deposit funds from L1 to Spark
   identity                                                            - Get the wallet's identity public key
   getsparkaddress                                                     - Get the wallet's spark address
+  encodeaddress <identityPublicKey> <network> (mainnet, regtest, testnet, signet, local) - Encodes a identity public key to a spark address
   decodesparkaddress <sparkAddress> <network(MAINNET|REGTEST|SIGNET|TESTNET|LOCAL))> - Decode a spark address to get the identity public key
   getlatesttx <address>                                               - Get the latest deposit transaction id for an address
   claimdeposit <txid>                                                 - Claim any pending deposits to the wallet
   claimstaticdepositquote <txid> [outputIndex]                        - Get a quote for claiming a static deposit
   claimstaticdeposit <txid> <creditAmountSats> <sspSignature> [outputIndex] - Claim a static deposits
-  refundstaticdeposit <depositTransactionId> <destinationAddress> <fee> [outputIndex] - Refund a static deposit
+  claimstaticdepositwithmaxfee <txid> <maxFee> [outputIndex]          - Claim a static deposit with a max fee
+  refundstaticdepositlegacy <depositTransactionId> <destinationAddress> <fee> [outputIndex] - Refund a static deposit legacy
+  refundstaticdeposit <depositTransactionId> <destinationAddress> <satsPerVbyteFee> [outputIndex] - Refund a static deposit
   gettransfers [limit] [offset]                                       - Get a list of transfers
   createinvoice <amount> <memo> <includeSparkAddress> [receiverIdentityPubkey] [descriptionHash] - Create a new lightning invoice
   payinvoice <invoice> <maxFeeSats> <preferSpark> [amountSatsToSend]  - Pay a lightning invoice
-  createpaymentintent <asset("btc" | tokenPubKey)> <amount> <memo>   - Create a spark payment request
+  createpaymentintent <asset("btc" | tokenIdentifier)> <amount> <memo>   - Create a spark payment request
   sendtransfer <amount> <receiverSparkAddress>                        - Send a spark transfer
   withdraw <amount> <onchainAddress> <exitSpeed(FAST|MEDIUM|SLOW)> [deductFeeFromWithdrawalAmount(true|false)] - Withdraw funds to an L1 address
   withdrawalfee <amount> <withdrawalAddress>                          - Get a fee estimate for a withdrawal (cooperative exit)
@@ -564,7 +571,6 @@ async function runCLI() {
   testonly_generateutxostring <txid> <vout> <value> <publicKey>                      - Generate correctly formatted UTXO string from your public key
   checktimelock <leafId>                                              - Get the remaining timelock for a given leaf
   testonly_expiretimelock <leafId>                                            - Refresh the timelock for a given leaf
-  testonly_expiretimelockrefundtx <leafId>                                    - Refresh only the refund transaction timelock for a given leaf
   leafidtohex <leafId1> [leafId2] [leafId3] ...                              - Convert leaf ID to hex string for unilateral exit
   getleaves                                                           - Get all leaves owned by the wallet
 
@@ -575,8 +581,8 @@ async function runCLI() {
   The advanced commands below are for specific use cases.
 
   Token Holder Commands:
-    transfertokens <tokenPubKey> <receiverSparkAddress> <amount>        - Transfer tokens
-    batchtransfertokens <tokenPubKey> <receiverAddress1:amount1> <receiverAddress2:amount2> ... - Transfer tokens with multiple outputs
+    transfertokens <tokenIdentifier> <receiverAddress> <amount>        - Transfer tokens
+    batchtransfertokens <tokenIdentifier> <receiverAddress1:amount1> <receiverAddress2:amount2> ... - Transfer tokens with multiple outputs
     querytokentransactions [--ownerPublicKeys] [--issuerPublicKeys] [--tokenTransactionHashes] [--tokenIdentifiers] [--outputIds] - Query token transaction history
 
   Token Issuer Commands:
@@ -591,6 +597,7 @@ async function runCLI() {
   unfreezetokens <sparkAddress>                                       - Unfreeze tokens for a specific address
   announcetoken <tokenName> <tokenTicker> <decimals> <maxSupply> <isFreezable> - Announce token on L1
   createtoken <tokenName> <tokenTicker> <decimals> <maxSupply> <isFreezable> - Create a new token
+  decodetokenidentifier <tokenIdentifier>                             - Returns the raw token identifier as a hex string
 
   help                                                                - Show this help message
   exit/quit                                                           - Exit the program
@@ -1018,6 +1025,45 @@ async function runCLI() {
             console.log(claimDeposit);
           }
           break;
+        case "claimstaticdepositwithmaxfee":
+          if (!wallet) {
+            console.log("Please initialize a wallet first");
+            break;
+          }
+
+          if (args[2] === undefined) {
+            const claimDepositWithMaxFee =
+              await wallet.claimStaticDepositWithMaxFee({
+                transactionId: args[0],
+                maxFee: parseInt(args[1]),
+              });
+
+            console.log(claimDepositWithMaxFee);
+          } else {
+            const claimDepositWithMaxFee =
+              await wallet.claimStaticDepositWithMaxFee({
+                transactionId: args[0],
+                maxFee: parseInt(args[1]),
+                outputIndex: parseInt(args[2]),
+              });
+
+            console.log(claimDepositWithMaxFee);
+          }
+          break;
+        case "refundstaticdepositlegacy":
+          if (!wallet) {
+            console.log("Please initialize a wallet first");
+            break;
+          }
+          const refundDepositLegacy = await wallet.refundStaticDeposit({
+            depositTransactionId: args[0],
+            destinationAddress: args[1],
+            fee: parseInt(args[2]),
+            outputIndex: args[3] ? parseInt(args[3]) : undefined,
+          });
+          console.log("Broadcast the transaction below to refund the deposit");
+          console.log(refundDepositLegacy);
+          break;
         case "refundstaticdeposit":
           if (!wallet) {
             console.log("Please initialize a wallet first");
@@ -1026,7 +1072,7 @@ async function runCLI() {
           const refundDeposit = await wallet.refundStaticDeposit({
             depositTransactionId: args[0],
             destinationAddress: args[1],
-            fee: parseInt(args[2]),
+            satsPerVbyteFee: parseInt(args[2]),
             outputIndex: args[3] ? parseInt(args[3]) : undefined,
           });
           console.log("Broadcast the transaction below to refund the deposit");
@@ -1065,7 +1111,7 @@ async function runCLI() {
         case "encodeaddress":
           if (args.length !== 2) {
             console.log(
-              "Usage: encodeaddress <sparkAddress> <network> (mainnet, regtest, testnet, signet, local)",
+              "Usage: encodeaddress <identityPublicKey> <network> (mainnet, regtest, testnet, signet, local)",
             );
             break;
           }
@@ -1137,20 +1183,20 @@ async function runCLI() {
           }
           if (args.length < 3) {
             console.log(
-              "Usage: transfertokens <tokenIdentifier> <receiverPubKey> <amount>",
+              "Usage: transfertokens <tokenIdentifier> <receiverAddress> <amount>",
             );
             break;
           }
 
           const tokenIdentifier = args[0] as Bech32mTokenIdentifier;
-          const tokenReceiverPubKey = args[1];
+          const receiverSparkAddress = args[1];
           const tokenAmount = BigInt(parseInt(args[2]));
 
           try {
             const result = await wallet.transferTokens({
               tokenIdentifier,
               tokenAmount: tokenAmount,
-              receiverSparkAddress: tokenReceiverPubKey,
+              receiverSparkAddress: receiverSparkAddress,
             });
             console.log("Transfer Transaction ID:", result);
           } catch (error) {
@@ -1168,7 +1214,7 @@ async function runCLI() {
           }
           if (args.length < 2) {
             console.log(
-              "Usage: batchtransfertokens <tokenPubKey> <receiverAddress1:amount1> <receiverAddress2:amount2> ...",
+              "Usage: batchtransfertokens <tokenIdentifier> <receiverAddress1:amount1> <receiverAddress2:amount2> ...",
             );
             break;
           }
@@ -1376,6 +1422,21 @@ async function runCLI() {
             isFreezable: isFreezable.toLowerCase() === "true",
           });
           console.log("Create Token Transaction ID:", result);
+          break;
+        }
+        case "decodetokenidentifier": {
+          const bech32mTokenIdentifier = args[0];
+          const network = getNetworkFromBech32mTokenIdentifier(
+            bech32mTokenIdentifier as Bech32mTokenIdentifier,
+          );
+          const decodedTokenIdentifier = decodeBech32mTokenIdentifier(
+            bech32mTokenIdentifier as Bech32mTokenIdentifier,
+            network,
+          );
+          console.log(
+            "Decoded Raw Token Identifier:",
+            bytesToHex(decodedTokenIdentifier.tokenIdentifier),
+          );
           break;
         }
         case "announcetoken": {
@@ -1773,68 +1834,16 @@ async function runCLI() {
             break;
           }
 
-          let refreshCount = 0;
-          let continueRefreshing = true;
-
-          console.log(`Starting timelock refresh loop for node: ${args[0]}`);
-
-          while (continueRefreshing) {
-            try {
-              await wallet.testOnly_expireTimelock(args[0]);
-              refreshCount++;
-              console.log(
-                `Successfully refreshed timelock for node: ${args[0]} (refresh #${refreshCount})`,
-              );
-
-              // Add a small delay between refreshes to avoid overwhelming the system
-              await new Promise((resolve) => setTimeout(resolve, 100));
-            } catch (error) {
-              console.log(
-                `Timelock refresh completed after ${refreshCount} refresh(es). Node timelock has expired.`,
-              );
-              console.log("Final error:", error);
-              continueRefreshing = false;
-            }
+          try {
+            await wallet.testOnly_expireTimelock(args[0]);
+            console.log(`Successfully refreshed timelock for node: ${args[0]}`);
+          } catch (error) {
+            console.log("Unable to expire timelock for node: ", args[0]);
+            console.log("Final error:", error);
           }
           break;
         }
-        case "testonly_expiretimelockrefundtx": {
-          if (!wallet) {
-            console.log("Please initialize a wallet first");
-            break;
-          }
-          if (args.length === 0) {
-            console.log("Usage: refreshtimelockrefundtx <leafId>");
-            break;
-          }
 
-          let refreshCount = 0;
-          let continueRefreshing = true;
-
-          console.log(
-            `Starting refund timelock refresh loop for node: ${args[0]}`,
-          );
-
-          while (continueRefreshing) {
-            try {
-              await wallet.testOnly_expireTimelockRefundTx(args[0]);
-              refreshCount++;
-              console.log(
-                `Successfully refreshed refund timelock for node: ${args[0]} (refresh #${refreshCount})`,
-              );
-
-              // Add a small delay between refreshes to avoid overwhelming the system
-              await new Promise((resolve) => setTimeout(resolve, 100));
-            } catch (error) {
-              console.log(
-                `Refund timelock refresh completed after ${refreshCount} refresh(es). Node refund timelock has expired.`,
-              );
-              console.log("Final error:", error);
-              continueRefreshing = false;
-            }
-          }
-          break;
-        }
         case "leafidtohex": {
           if (!wallet) {
             console.log("Please initialize a wallet first");
@@ -2182,45 +2191,12 @@ async function runCLI() {
                 console.log(
                   `  🔄 Expiring node timelock for leaf ${leaf.id}...`,
                 );
-                let nodeRefreshCount = 0;
-                let continueNodeRefreshing = true;
 
-                while (continueNodeRefreshing) {
-                  try {
-                    await wallet.testOnly_expireTimelock(leaf.id);
-                    nodeRefreshCount++;
-                    console.log(
-                      `    ✅ Node timelock refresh #${nodeRefreshCount}`,
-                    );
-                    await new Promise((resolve) => setTimeout(resolve, 100));
-                  } catch (error) {
-                    console.log(
-                      `    ✅ Node timelock expired after ${nodeRefreshCount} refresh(es)`,
-                    );
-                    continueNodeRefreshing = false;
-                  }
-                }
-
-                console.log(
-                  `  🔄 Expiring refund timelock for leaf ${leaf.id}...`,
-                );
-                let refundRefreshCount = 0;
-                let continueRefundRefreshing = true;
-
-                while (continueRefundRefreshing) {
-                  try {
-                    await wallet.testOnly_expireTimelockRefundTx(leaf.id);
-                    refundRefreshCount++;
-                    console.log(
-                      `    ✅ Refund timelock refresh #${refundRefreshCount}`,
-                    );
-                    await new Promise((resolve) => setTimeout(resolve, 100));
-                  } catch (error) {
-                    console.log(
-                      `    ✅ Refund timelock expired after ${refundRefreshCount} refresh(es)`,
-                    );
-                    continueRefundRefreshing = false;
-                  }
+                try {
+                  await wallet.testOnly_expireTimelock(leaf.id);
+                  console.log(`    ✅ Node timelock expired`);
+                } catch (error) {
+                  console.log(`    ❌ Unable to expire timelock`);
                 }
                 await wallet.getLeaves();
                 console.log("");

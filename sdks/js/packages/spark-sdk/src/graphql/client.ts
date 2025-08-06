@@ -10,6 +10,7 @@ import {
 import { sha256 } from "@noble/hashes/sha2";
 import { AuthenticationError, NetworkError } from "../errors/index.js";
 import { SparkSigner } from "../signer/signer.js";
+import { UserRequestType } from "../types/sdk-types.js";
 import { ClaimStaticDeposit } from "./mutations/ClaimStaticDeposit.js";
 import { CompleteCoopExit } from "./mutations/CompleteCoopExit.js";
 import { CompleteLeavesSwap } from "./mutations/CompleteLeavesSwap.js";
@@ -19,6 +20,7 @@ import { RequestLightningReceive } from "./mutations/RequestLightningReceive.js"
 import { RequestLightningSend } from "./mutations/RequestLightningSend.js";
 import { RequestSwapLeaves } from "./mutations/RequestSwapLeaves.js";
 import { VerifyChallenge } from "./mutations/VerifyChallenge.js";
+import { ClaimStaticDepositFromJson } from "./objects/ClaimStaticDeposit.js";
 import ClaimStaticDepositOutput, {
   ClaimStaticDepositOutputFromJson,
 } from "./objects/ClaimStaticDepositOutput.js";
@@ -29,7 +31,7 @@ import CoopExitRequest, {
   CoopExitRequestFromJson,
 } from "./objects/CoopExitRequest.js";
 import { GetChallengeOutputFromJson } from "./objects/GetChallengeOutput.js";
-import type {
+import {
   BitcoinNetwork,
   CompleteCoopExitInput,
   CompleteLeavesSwapInput,
@@ -70,7 +72,7 @@ import { GetClaimDepositQuote } from "./queries/GetClaimDepositQuote.js";
 import { GetCoopExitFeeQuote } from "./queries/GetCoopExitFeeQuote.js";
 import { LeavesSwapFeeEstimate } from "./queries/LeavesSwapFeeEstimate.js";
 import { LightningSendFeeEstimate } from "./queries/LightningSendFeeEstimate.js";
-import { GetTransfer } from "./queries/Transfer.js";
+import { GetTransfers } from "./queries/Transfers.js";
 import { UserRequest } from "./queries/UserRequest.js";
 import { getFetch } from "../utils/fetch.js";
 
@@ -78,6 +80,10 @@ export interface SspClientOptions {
   baseUrl: string;
   identityPublicKey: string;
   schemaEndpoint?: string;
+}
+
+export interface TransferWithUserRequest extends Transfer {
+  userRequest?: UserRequestType;
 }
 
 export interface MayHaveSspClientOptions {
@@ -309,6 +315,8 @@ export default class SspClient {
 
   async requestLeaveSwap({
     adaptorPubkey,
+    directAdaptorPubkey,
+    directFromCpfpAdaptorPubkey,
     totalAmountSats,
     targetAmountSats,
     feeSats,
@@ -320,6 +328,8 @@ export default class SspClient {
       queryPayload: RequestSwapLeaves,
       variables: {
         adaptor_pubkey: adaptorPubkey,
+        direct_adaptor_pubkey: directAdaptorPubkey,
+        direct_from_cpfp_adaptor_pubkey: directFromCpfpAdaptorPubkey,
         total_amount_sats: totalAmountSats,
         target_amount_sats: targetAmountSats,
         fee_sats: feeSats,
@@ -340,6 +350,8 @@ export default class SspClient {
 
   async completeLeaveSwap({
     adaptorSecretKey,
+    directAdaptorSecretKey,
+    directFromCpfpAdaptorSecretKey,
     userOutboundTransferExternalId,
     leavesSwapRequestId,
   }: CompleteLeavesSwapInput): Promise<LeavesSwapRequest | null> {
@@ -347,6 +359,8 @@ export default class SspClient {
       queryPayload: CompleteLeavesSwap,
       variables: {
         adaptor_secret_key: adaptorSecretKey,
+        direct_adaptor_secret_key: directAdaptorSecretKey,
+        direct_from_cpfp_adaptor_secret_key: directFromCpfpAdaptorSecretKey,
         user_outbound_transfer_external_id: userOutboundTransferExternalId,
         leaves_swap_request_id: leavesSwapRequestId,
       },
@@ -477,14 +491,49 @@ export default class SspClient {
     });
   }
 
-  async getTransfer(id: string): Promise<Transfer | null> {
+  async getTransfers(ids: string[]): Promise<TransferWithUserRequest[]> {
     return await this.executeRawQuery({
-      queryPayload: GetTransfer,
+      queryPayload: GetTransfers,
       variables: {
-        transfer_spark_id: id,
+        transfer_spark_ids: ids,
       },
-      constructObject: (response: { transfer: any }) => {
-        return TransferFromJson(response.transfer);
+      constructObject: (response: { transfers: any }) => {
+        return response.transfers.map((transfer: any) => {
+          const transferObj: TransferWithUserRequest = TransferFromJson(
+            transfer,
+          ) as TransferWithUserRequest;
+
+          switch (transfer.transfer_user_request.__typename) {
+            case "ClaimStaticDeposit":
+              transferObj.userRequest = ClaimStaticDepositFromJson(
+                transfer.transfer_user_request,
+              );
+              break;
+            case "CoopExitRequest":
+              transferObj.userRequest = CoopExitRequestFromJson(
+                transfer.transfer_user_request,
+              );
+              break;
+            case "LeavesSwapRequest":
+              transferObj.userRequest = LeavesSwapRequestFromJson(
+                transfer.transfer_user_request,
+              );
+              break;
+            case "LightningReceiveRequest":
+              transferObj.userRequest = LightningReceiveRequestFromJson(
+                transfer.transfer_user_request,
+              );
+              break;
+            case "LightningSendRequest":
+              transferObj.userRequest = LightningSendRequestFromJson(
+                transfer.transfer_user_request,
+              );
+              break;
+          }
+
+          const { userRequestId, ...rest } = transferObj;
+          return rest;
+        });
       },
     });
   }

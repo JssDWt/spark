@@ -132,11 +132,16 @@ export type SigningOperator = {
   readonly identityPublicKey: string;
 };
 
+/* Console logging and debug tool options */
+export type ConsoleOptions = {
+  otel?: boolean;
+};
+
 export type ConfigOptions = MayHaveLrc20WalletApiConfig &
   MayHaveSspClientOptions & {
     readonly network?: NetworkType;
     readonly signingOperators?: Readonly<Record<string, SigningOperator>>;
-    readonly coodinatorIdentifier?: string;
+    readonly coordinatorIdentifier?: string;
     readonly frostSignerAddress?: string;
     readonly lrc20Address?: string;
     readonly threshold?: number;
@@ -148,13 +153,8 @@ export type ConfigOptions = MayHaveLrc20WalletApiConfig &
     readonly sspClientOptions?: SspClientOptions;
     readonly expectedWithdrawBondSats?: number;
     readonly expectedWithdrawRelativeBlockLocktime?: number;
+    readonly console?: ConsoleOptions;
   };
-
-const DEV_PUBKEYS = [
-  "03acd9a5a88db102730ff83dee69d69088cc4c9d93bbee893e90fd5051b7da9651",
-  "02d2d103cacb1d6355efeab27637c74484e2a7459e49110c3fe885210369782e23",
-  "0350f07ffc21bfd59d31e0a7a600e2995273938444447cb9bc4c75b8a895dbb853",
-];
 
 const PROD_PUBKEYS = [
   "03dfbdff4b6332c220f8fa2ba8ed496c698ceada563fa01b67d9983bfc5c95e763",
@@ -169,7 +169,7 @@ function getLocalFrostSignerAddress(): string {
 const BASE_CONFIG: Required<ConfigOptions> = {
   network: "LOCAL",
   lrc20Address: getLrc20Url("LOCAL"),
-  coodinatorIdentifier:
+  coordinatorIdentifier:
     "0000000000000000000000000000000000000000000000000000000000000001",
   frostSignerAddress: getLocalFrostSignerAddress(),
   threshold: 2,
@@ -189,6 +189,9 @@ const BASE_CONFIG: Required<ConfigOptions> = {
     baseUrl: getSspUrl("LOCAL"),
     identityPublicKey: getSspIdentityPublicKey("LOCAL"),
     schemaEndpoint: getSspSchemaEndpoint("LOCAL"),
+  },
+  console: {
+    otel: false,
   },
 };
 
@@ -280,6 +283,12 @@ function getSigningOperators(): Record<string, SigningOperator> {
 }
 
 export function getLocalSigningOperators(): Record<string, SigningOperator> {
+  const addresses = Array.from({ length: 5 }, (_, i) =>
+    isHermeticTest
+      ? `https://${i}.spark.minikube.local`
+      : `https://localhost:${i + 8535}`,
+  );
+
   const pubkeys = [
     "0322ca18fc489ae25418a0e768273c2c61cabb823edfb14feb891e9bec62016510",
     "0341727a6c41b168f07eb50865ab8c397a53c7eef628ac1020956b705e43b6cb27",
@@ -293,35 +302,35 @@ export function getLocalSigningOperators(): Record<string, SigningOperator> {
       id: 0,
       identifier:
         "0000000000000000000000000000000000000000000000000000000000000001",
-      address: "https://localhost:8535",
+      address: addresses[0]!,
       identityPublicKey: pubkeys[0]!,
     },
     "0000000000000000000000000000000000000000000000000000000000000002": {
       id: 1,
       identifier:
         "0000000000000000000000000000000000000000000000000000000000000002",
-      address: "https://localhost:8536",
+      address: addresses[1]!,
       identityPublicKey: pubkeys[1]!,
     },
     "0000000000000000000000000000000000000000000000000000000000000003": {
       id: 2,
       identifier:
         "0000000000000000000000000000000000000000000000000000000000000003",
-      address: "https://localhost:8537",
+      address: addresses[2]!,
       identityPublicKey: pubkeys[2]!,
     },
     "0000000000000000000000000000000000000000000000000000000000000004": {
       id: 3,
       identifier:
         "0000000000000000000000000000000000000000000000000000000000000004",
-      address: "https://localhost:8538",
+      address: addresses[3]!,
       identityPublicKey: pubkeys[3]!,
     },
     "0000000000000000000000000000000000000000000000000000000000000005": {
       id: 4,
       identifier:
         "0000000000000000000000000000000000000000000000000000000000000005",
-      address: "https://localhost:8539",
+      address: addresses[4]!,
       identityPublicKey: pubkeys[4]!,
     },
   };

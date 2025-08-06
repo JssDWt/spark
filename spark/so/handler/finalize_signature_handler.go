@@ -100,6 +100,9 @@ func (o *FinalizeSignatureHandler) finalizeNodeSignatures(ctx context.Context, r
 				return nil, fmt.Errorf("failed to get deposit address: %w", err)
 			}
 			if address.ConfirmationHeight != 0 {
+				if len(address.ConfirmationTxid) > 0 && address.ConfirmationTxid != string(tree.BaseTxid) {
+					return nil, fmt.Errorf("confirmation txid does not match tree base txid")
+				}
 				_, err = tree.Update().SetStatus(st.TreeStatusAvailable).Save(ctx)
 				if err != nil {
 					return nil, fmt.Errorf("failed to update tree: %w", err)
@@ -120,7 +123,7 @@ func (o *FinalizeSignatureHandler) finalizeNodeSignatures(ctx context.Context, r
 		internalNodes = append(internalNodes, internalNode)
 	}
 
-	//Send gossip message to other SOs
+	// Send gossip message to other SOs
 	selection := helper.OperatorSelection{Option: helper.OperatorSelectionOptionExcludeSelf}
 	participants, err := selection.OperatorIdentifierList(o.config)
 	if err != nil {
@@ -134,7 +137,6 @@ func (o *FinalizeSignatureHandler) finalizeNodeSignatures(ctx context.Context, r
 	switch req.Intent {
 	case pbcommon.SignatureIntent_CREATION:
 		protoNetwork, err := common.ProtoNetworkFromNetwork(network)
-
 		if err != nil {
 			return nil, err
 		}
@@ -219,35 +221,35 @@ func (o *FinalizeSignatureHandler) verifyAndUpdateTransfer(ctx context.Context, 
 		return nil, fmt.Errorf("failed to get or create current tx for request: %w", err)
 	}
 
-	var transfer *ent.Transfer
+	// Extract leaf IDs from node signatures
+	leafIDs := make([]uuid.UUID, 0, len(req.NodeSignatures))
 	for _, nodeSignatures := range req.NodeSignatures {
 		leafID, err := uuid.Parse(nodeSignatures.NodeId)
 		if err != nil {
 			return nil, fmt.Errorf("invalid node id in request %s: %w", logging.FormatProto("finalize_node_signatures_request", req), err)
 		}
-		leafTransfer, err := db.Transfer.Query().
-			Where(
-				enttransfer.StatusEQ(st.TransferStatusReceiverRefundSigned),
-				enttransfer.HasTransferLeavesWith(
-					transferleaf.HasLeafWith(
-						treenode.IDEQ(leafID),
-					),
+		leafIDs = append(leafIDs, leafID)
+	}
+
+	// Find all ongoing transfers that involves any of these leaves. All these leaves should be
+	// part of a **single** transfer so we expect one result.
+	transfer, err := db.Transfer.Query().
+		WithTransferLeaves().
+		Where(
+			enttransfer.StatusEQ(st.TransferStatusReceiverRefundSigned),
+			enttransfer.HasTransferLeavesWith(
+				transferleaf.HasLeafWith(
+					treenode.IDIn(leafIDs...),
 				),
-			).
-			Only(ctx)
-		if err != nil {
-			return nil, fmt.Errorf("failed to find pending transfer for leaf %s: %w", leafID.String(), err)
-		}
-		if transfer == nil {
-			transfer = leafTransfer
-		} else if transfer.ID != leafTransfer.ID {
-			return nil, fmt.Errorf("expect all leaves to belong to the same transfer")
-		}
-	}
-	numTransferLeaves, err := transfer.QueryTransferLeaves().Count(ctx)
+			),
+		).
+		ForUpdate().
+		Only(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get the number of transfer leaves for transfer %s: %w", transfer.ID.String(), err)
+		return nil, fmt.Errorf("failed to find pending transfer for leaves %s: %w", leafIDs, err)
 	}
+
+	numTransferLeaves := len(transfer.Edges.TransferLeaves)
 	if len(req.NodeSignatures) != numTransferLeaves {
 		return nil, fmt.Errorf("missing signatures for transfer %s", transfer.ID.String())
 	}
@@ -271,7 +273,7 @@ func (o *FinalizeSignatureHandler) updateNode(ctx context.Context, nodeSignature
 	}
 
 	// Read the tree node
-	node, err := db.TreeNode.Get(ctx, nodeID)
+	node, err := db.TreeNode.Query().Where(treenode.ID(nodeID)).WithChildren().Only(ctx)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to get node in %s: %w", logging.FormatProto("node_signatures", nodeSignatures), err)
 	}
@@ -292,7 +294,7 @@ func (o *FinalizeSignatureHandler) updateNode(ctx context.Context, nodeSignature
 			if err != nil {
 				return nil, nil, fmt.Errorf("failed to update direct tx with signature %s: %w", logging.FormatProto("node_signatures", nodeSignatures), err)
 			}
-		} else if len(nodeSignatures.DirectNodeTxSignature) == 0 && requireDirectTx {
+		} else if len(nodeSignatures.DirectNodeTxSignature) == 0 && requireDirectTx && len(node.DirectTx) > 0 {
 			return nil, nil, fmt.Errorf("DirectNodeTxSignature is required. Please upgrade to the latest SDK version")
 		}
 		// Node may not have parent if it is the root node
@@ -385,7 +387,7 @@ func (o *FinalizeSignatureHandler) updateNode(ctx context.Context, nodeSignature
 			if err != nil {
 				return nil, nil, fmt.Errorf("unable to verify direct from cpfp refund tx signature: %w", err)
 			}
-		} else if requireDirectTx {
+		} else if requireDirectTx && len(node.DirectTx) > 0 {
 			return nil, nil, fmt.Errorf("DirectRefundTxSignature and DirectFromCpfpRefundTxSignature are required. Please upgrade to the latest SDK version.")
 		}
 	} else {
@@ -407,7 +409,7 @@ func (o *FinalizeSignatureHandler) updateNode(ctx context.Context, nodeSignature
 		SetDirectRefundTx(directRefundTxBytes).
 		SetDirectFromCpfpRefundTx(directFromCpfpRefundTxBytes)
 	if tree.Status == st.TreeStatusAvailable {
-		if len(node.RawRefundTx) > 0 {
+		if len(node.RawRefundTx) > 0 && len(node.Edges.Children) == 0 {
 			nodeMutator.SetStatus(st.TreeNodeStatusAvailable)
 		} else {
 			nodeMutator.SetStatus(st.TreeNodeStatusSplitted)

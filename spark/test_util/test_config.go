@@ -6,6 +6,8 @@ import (
 	"os"
 	"strconv"
 
+	"github.com/lightsparkdev/spark/common/keys"
+
 	"github.com/decred/dcrd/dcrec/secp256k1/v4"
 	"github.com/lightsparkdev/spark/common"
 	"github.com/lightsparkdev/spark/so"
@@ -40,16 +42,20 @@ var testOperatorPrivkeys = []string{
 	"effe79dc2a911a5a359910cb7782f5cabb3b7cf01e3809f8d323898ffd78e408",
 }
 
-func decodePubkeys(pubkeys []string) ([][]byte, error) {
-	pubkeyBytesArray := make([][]byte, len(pubkeys))
-	for i, pubkey := range pubkeys {
-		pubkeyBytes, err := hex.DecodeString(pubkey)
+func decodePubKeys(pubKeys []string) ([]keys.Public, error) {
+	parsed := make([]keys.Public, len(pubKeys))
+	for i, pubKey := range pubKeys {
+		pubKeyBytes, err := hex.DecodeString(pubKey)
 		if err != nil {
 			return nil, err
 		}
-		pubkeyBytesArray[i] = pubkeyBytes
+		key, err := keys.ParsePublicKey(pubKeyBytes)
+		if err != nil {
+			return nil, err
+		}
+		parsed[i] = key
 	}
-	return pubkeyBytesArray, nil
+	return parsed, nil
 }
 
 func operatorCount() (int, error) {
@@ -74,7 +80,7 @@ func GetAllSigningOperators() (map[string]*so.SigningOperator, error) {
 		return nil, err
 	}
 
-	pubkeyBytesArray, err := decodePubkeys(testOperatorPubkeys[:opCount])
+	pubkeyBytesArray, err := decodePubKeys(testOperatorPubkeys[:opCount])
 	if err != nil {
 		return nil, err
 	}
@@ -86,12 +92,18 @@ func GetAllSigningOperators() (map[string]*so.SigningOperator, error) {
 
 	operators := make(map[string]*so.SigningOperator, opCount)
 	basePort := 8535
-	for i := 0; i < opCount; i++ {
+	for i := range opCount {
 		id := fmt.Sprintf("%064x", i+1) // "000…001", "000…002" …
+		address := fmt.Sprintf("localhost:%d", basePort+i)
+		if isHermeticTest() {
+			address = fmt.Sprintf("dns:///%d.spark.minikube.local", i)
+		}
+
 		operators[id] = &so.SigningOperator{
 			ID:                uint64(i),
 			Identifier:        id,
-			Address:           fmt.Sprintf("localhost:%d", basePort+i),
+			AddressRpc:        address,
+			AddressDkg:        address,
 			IdentityPublicKey: pubkeyBytesArray[i],
 			CertPath:          &certPath,
 		}
@@ -106,7 +118,7 @@ func GetAllSigningOperatorsDeployed() (map[string]*so.SigningOperator, error) {
 		"0350f07ffc21bfd59d31e0a7a600e2995273938444447cb9bc4c75b8a895dbb853",
 	}
 
-	pubkeyBytesArray, err := decodePubkeys(pubkeys)
+	pubkeyBytesArray, err := decodePubKeys(pubkeys)
 	if err != nil {
 		return nil, err
 	}
@@ -115,19 +127,22 @@ func GetAllSigningOperatorsDeployed() (map[string]*so.SigningOperator, error) {
 		"0000000000000000000000000000000000000000000000000000000000000001": {
 			ID:                0,
 			Identifier:        "0000000000000000000000000000000000000000000000000000000000000001",
-			Address:           "dns:///0.spark.dev.dev.sparkinfra.net",
+			AddressRpc:        "dns:///0.spark.dev.dev.sparkinfra.net",
+			AddressDkg:        "dns:///0.spark.dev.dev.sparkinfra.net",
 			IdentityPublicKey: pubkeyBytesArray[0],
 		},
 		"0000000000000000000000000000000000000000000000000000000000000002": {
 			ID:                1,
 			Identifier:        "0000000000000000000000000000000000000000000000000000000000000002",
-			Address:           "dns:///1.spark.dev.dev.sparkinfra.net",
+			AddressRpc:        "dns:///1.spark.dev.dev.sparkinfra.net",
+			AddressDkg:        "dns:///1.spark.dev.dev.sparkinfra.net",
 			IdentityPublicKey: pubkeyBytesArray[1],
 		},
 		"0000000000000000000000000000000000000000000000000000000000000003": {
 			ID:                2,
 			Identifier:        "0000000000000000000000000000000000000000000000000000000000000003",
-			Address:           "dns:///2.spark.dev.dev.sparkinfra.net",
+			AddressRpc:        "dns:///2.spark.dev.dev.sparkinfra.net",
+			AddressDkg:        "dns:///2.spark.dev.dev.sparkinfra.net",
 			IdentityPublicKey: pubkeyBytesArray[2],
 		},
 	}, nil
@@ -164,24 +179,29 @@ func SpecificOperatorTestConfig(operatorIndex int) (*so.Config, error) {
 	if err != nil {
 		return nil, err
 	}
+	identityPrivateKey, err := keys.ParsePrivateKey(identityPrivateKeyBytes)
+	if err != nil {
+		return nil, err
+	}
 
 	signingOperators, err := GetAllSigningOperators()
 	if err != nil {
 		return nil, err
 	}
+
 	identifier := fmt.Sprintf("000000000000000000000000000000000000000000000000000000000000000%d", operatorIndex+1)
 	opCount := len(signingOperators)
 	threshold := (opCount + 2) / 2 // 1/1, 2/2, 2/3, 3/4, 3/5
 	config := so.Config{
-		Index:                 uint64(operatorIndex),
-		Identifier:            identifier,
-		IdentityPrivateKey:    identityPrivateKeyBytes,
-		SigningOperatorMap:    signingOperators,
-		Threshold:             uint64(threshold),
-		SignerAddress:         getLocalFrostSignerAddress(),
-		DatabasePath:          getTestDatabasePath(operatorIndex),
-		DKGCoordinatorAddress: signingOperators[identifier].Address,
+		Index:              uint64(operatorIndex),
+		Identifier:         identifier,
+		IdentityPrivateKey: identityPrivateKey,
+		SigningOperatorMap: signingOperators,
+		Threshold:          uint64(threshold),
+		SignerAddress:      getLocalFrostSignerAddress(),
+		DatabasePath:       getTestDatabasePath(operatorIndex),
 	}
+
 	return &config, nil
 }
 
@@ -211,16 +231,29 @@ func TestWalletConfigWithIdentityKey(identityPrivKey secp256k1.PrivateKey) (*wal
 		})
 }
 
+// TestWalletConfigWithIdentityKey returns a wallet configuration with specified identity key that can be used for testing.
+func TestWalletConfigWithIdentityKeyAndCoordinator(identityPrivKey secp256k1.PrivateKey, coordinatorIndex int) (*wallet.Config, error) {
+	return TestWalletConfigWithParams(
+		TestWalletConfigParams{
+			IdentityPrivateKey: &identityPrivKey,
+			CoordinatorIndex:   coordinatorIndex,
+		})
+}
+
 func TestWalletConfigDeployed(identityPrivKeyBytes []byte) (*wallet.Config, error) {
-	identityPrivKey := secp256k1.PrivKeyFromBytes(identityPrivKeyBytes)
-	if identityPrivKey == nil {
+	identityPrivKey, err := keys.ParsePrivateKey(identityPrivKeyBytes)
+	if err != nil {
 		return nil, fmt.Errorf("failed to generate identity private key")
 	}
 	signingOperators, err := GetAllSigningOperatorsDeployed()
 	if err != nil {
 		return nil, err
 	}
-	sspIdentityKey, err := hex.DecodeString("028c094a432d46a0ac95349d792c2e3730bd60c29188db716f56a99e39b95338b4")
+	sspIdentityKeyBytes, err := hex.DecodeString("028c094a432d46a0ac95349d792c2e3730bd60c29188db716f56a99e39b95338b4")
+	if err != nil {
+		return nil, err
+	}
+	sspIdentityKey, err := keys.ParsePublicKey(sspIdentityKeyBytes)
 	if err != nil {
 		return nil, err
 	}
@@ -229,22 +262,26 @@ func TestWalletConfigDeployed(identityPrivKeyBytes []byte) (*wallet.Config, erro
 		SigningOperators:                      signingOperators,
 		CoodinatorIdentifier:                  "0000000000000000000000000000000000000000000000000000000000000001",
 		FrostSignerAddress:                    "unix:///tmp/frost_wallet.sock",
-		IdentityPrivateKey:                    *identityPrivKey,
+		IdentityPrivateKey:                    identityPrivKey,
 		Threshold:                             2,
 		SparkServiceProviderIdentityPublicKey: sspIdentityKey,
 	}, nil
 }
 
 func TestWalletConfigDeployedMainnet(identityPrivKeyBytes []byte) (*wallet.Config, error) {
-	identityPrivKey := secp256k1.PrivKeyFromBytes(identityPrivKeyBytes)
-	if identityPrivKey == nil {
+	identityPrivKey, err := keys.ParsePrivateKey(identityPrivKeyBytes)
+	if err != nil {
 		return nil, fmt.Errorf("failed to generate identity private key")
 	}
 	signingOperators, err := GetAllSigningOperatorsDeployed()
 	if err != nil {
 		return nil, err
 	}
-	sspIdentityKey, err := hex.DecodeString("02e0b8d42c5d3b5fe4c5beb6ea796ab3bc8aaf28a3d3195407482c67e0b58228a5")
+	sspIdentityKeyBytes, err := hex.DecodeString("02e0b8d42c5d3b5fe4c5beb6ea796ab3bc8aaf28a3d3195407482c67e0b58228a5")
+	if err != nil {
+		return nil, err
+	}
+	sspIdentityKey, err := keys.ParsePublicKey(sspIdentityKeyBytes)
 	if err != nil {
 		return nil, err
 	}
@@ -253,7 +290,7 @@ func TestWalletConfigDeployedMainnet(identityPrivKeyBytes []byte) (*wallet.Confi
 		SigningOperators:                      signingOperators,
 		CoodinatorIdentifier:                  "0000000000000000000000000000000000000000000000000000000000000001",
 		FrostSignerAddress:                    "unix:///tmp/frost_wallet.sock",
-		IdentityPrivateKey:                    *identityPrivKey,
+		IdentityPrivateKey:                    identityPrivKey,
 		Threshold:                             2,
 		SparkServiceProviderIdentityPublicKey: sspIdentityKey,
 	}, nil
@@ -280,12 +317,12 @@ func TestWalletConfigWithParams(p TestWalletConfigParams) (*wallet.Config, error
 		p.CoordinatorIndex = 0
 	}
 
-	var privKey *secp256k1.PrivateKey
+	var privKey keys.Private
 	if p.IdentityPrivateKey != nil {
-		privKey = p.IdentityPrivateKey
+		privKey = keys.PrivateFromKey(*p.IdentityPrivateKey)
 	} else {
 		var err error
-		privKey, err = secp256k1.GeneratePrivateKey()
+		privKey, err = keys.GeneratePrivateKey()
 		if err != nil {
 			return nil, fmt.Errorf("failed to generate identity private key: %w", err)
 		}
@@ -303,7 +340,7 @@ func TestWalletConfigWithParams(p TestWalletConfigParams) (*wallet.Config, error
 		SigningOperators:                     signingOperators,
 		CoodinatorIdentifier:                 coordinatorIdentifier,
 		FrostSignerAddress:                   getLocalFrostSignerAddress(),
-		IdentityPrivateKey:                   *privKey,
+		IdentityPrivateKey:                   privKey,
 		Threshold:                            3,
 		CoordinatorDatabaseURI:               getTestDatabasePath(p.CoordinatorIndex),
 		UseTokenTransactionSchnorrSignatures: p.UseTokenTransactionSchnorrSignatures,

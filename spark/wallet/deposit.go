@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/lightsparkdev/spark/common/keys"
+
 	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/btcsuite/btcd/btcec/v2/schnorr"
 	"github.com/btcsuite/btcd/txscript"
@@ -35,7 +37,7 @@ func validateDepositAddress(config *Config, address *pb.Address, userPubkey []by
 	if err != nil {
 		return err
 	}
-	msg := common.ProofOfPossessionMessageHashForDepositAddress(config.IdentityPublicKey(), operatorPubkey, []byte(address.Address))
+	msg := common.ProofOfPossessionMessageHashForDepositAddress(config.IdentityPublicKey().Serialize(), operatorPubkey, []byte(address.Address))
 	sig, err := schnorr.ParseSignature(address.DepositAddressProof.ProofOfPossessionSignature)
 	if err != nil {
 		return err
@@ -61,11 +63,6 @@ func validateDepositAddress(config *Config, address *pb.Address, userPubkey []by
 		if operator.Identifier == config.CoodinatorIdentifier {
 			continue
 		}
-		operatorPubkey, err := secp256k1.ParsePubKey(operator.IdentityPublicKey)
-		if err != nil {
-			return err
-		}
-
 		operatorSig, ok := address.DepositAddressProof.AddressSignatures[operator.Identifier]
 		if !ok {
 			return fmt.Errorf("address signature for operator %s is nil", operator.Identifier)
@@ -76,7 +73,7 @@ func validateDepositAddress(config *Config, address *pb.Address, userPubkey []by
 			return err
 		}
 
-		if !sig.Verify(addrHash[:], operatorPubkey) {
+		if !sig.Verify(addrHash[:], operator.IdentityPublicKey.ToBTCEC()) {
 			return fmt.Errorf("signature verification failed for operator %s", operator.Identifier)
 		}
 	}
@@ -101,7 +98,7 @@ func GenerateDepositAddress(
 	sparkClient := pb.NewSparkServiceClient(sparkConn)
 	depositResp, err := sparkClient.GenerateDepositAddress(ctx, &pb.GenerateDepositAddressRequest{
 		SigningPublicKey:  signingPubkey,
-		IdentityPublicKey: config.IdentityPublicKey(),
+		IdentityPublicKey: config.IdentityPublicKey().Serialize(),
 		Network:           config.ProtoNetwork(),
 		LeafId:            customLeafID,
 		IsStatic:          &isStatic,
@@ -130,7 +127,7 @@ func GenerateStaticDepositAddress(
 	isStatic := true
 	depositResp, err := sparkClient.GenerateDepositAddress(ctx, &pb.GenerateDepositAddressRequest{
 		SigningPublicKey:  signingPubkey,
-		IdentityPublicKey: config.IdentityPublicKey(),
+		IdentityPublicKey: config.IdentityPublicKey().Serialize(),
 		Network:           config.ProtoNetwork(),
 		IsStatic:          &isStatic,
 	})
@@ -164,7 +161,7 @@ func QueryUnusedDepositAddresses(
 
 	for {
 		response, err := sparkClient.QueryUnusedDepositAddresses(ctx, &pb.QueryUnusedDepositAddressesRequest{
-			IdentityPublicKey: config.IdentityPublicKey(),
+			IdentityPublicKey: config.IdentityPublicKey().Serialize(),
 			Network:           network,
 			Limit:             limit,
 			Offset:            offset,
@@ -205,27 +202,33 @@ func QueryStaticDepositAddresses(
 		return nil, fmt.Errorf("failed to get proto network: %w", err)
 	}
 	return sparkClient.QueryStaticDepositAddresses(ctx, &pb.QueryStaticDepositAddressesRequest{
-		IdentityPublicKey: config.IdentityPublicKey(),
+		IdentityPublicKey: config.IdentityPublicKey().Serialize(),
 		Network:           network,
 	})
 }
 
+// DepositTreeCreationData holds the data needed to finalize deposit tree creation
 // CreateTreeRoot creates a tree root for a given deposit transaction.
 func CreateTreeRoot(
 	ctx context.Context,
 	config *Config,
-	signingPrivKey,
+	signingPrivKeyBytes,
 	verifyingKey []byte,
 	depositTx *wire.MsgTx,
 	vout int,
+	skipFinalizeSignatures bool,
 ) (*pb.FinalizeNodeSignaturesResponse, error) {
-	signingPubkey := secp256k1.PrivKeyFromBytes(signingPrivKey).PubKey()
-	signingPubkeyBytes := signingPubkey.SerializeCompressed()
+	signingPrivKey, err := keys.ParsePrivateKey(signingPrivKeyBytes)
+	if err != nil {
+		return nil, err
+	}
+	signingPubkey := signingPrivKey.Public()
+	signingPubkeyBytes := signingPubkey.Serialize()
 	// Creat root tx
 	depositOutPoint := &wire.OutPoint{Hash: depositTx.TxHash(), Index: uint32(vout)}
 	rootTx := createRootTx(depositOutPoint, depositTx.TxOut[0])
 	var rootBuf bytes.Buffer
-	err := rootTx.Serialize(&rootBuf)
+	err = rootTx.Serialize(&rootBuf)
 	if err != nil {
 		return nil, err
 	}
@@ -292,7 +295,7 @@ func CreateTreeRoot(
 	sparkClient := pb.NewSparkServiceClient(sparkConn)
 
 	treeResponse, err := sparkClient.StartDepositTreeCreation(ctx, &pb.StartDepositTreeCreationRequest{
-		IdentityPublicKey: config.IdentityPublicKey(),
+		IdentityPublicKey: config.IdentityPublicKey().Serialize(),
 		OnChainUtxo: &pb.UTXO{
 			Vout:    uint32(vout),
 			RawTx:   depositBuf.Bytes(),
@@ -313,11 +316,15 @@ func CreateTreeRoot(
 		return nil, err
 	}
 
+	if skipFinalizeSignatures {
+		return nil, nil
+	}
+
 	if !bytes.Equal(treeResponse.RootNodeSignatureShares.VerifyingKey, verifyingKey) {
 		return nil, fmt.Errorf("verifying key does not match")
 	}
 
-	userKeyPackage := CreateUserKeyPackage(signingPrivKey)
+	userKeyPackage := CreateUserKeyPackage(signingPrivKeyBytes)
 
 	userSigningJobs := make([]*pbfrost.FrostSigningJob, 0)
 	nodeJobID := uuid.NewString()
@@ -495,7 +502,7 @@ func ClaimStaticDepositLegacy(
 		SspSignature:  sspSignature,
 		Transfer: &pb.StartTransferRequest{
 			TransferId:                transferID.String(),
-			OwnerIdentityPublicKey:    config.IdentityPublicKey(),
+			OwnerIdentityPublicKey:    config.IdentityPublicKey().Serialize(),
 			ReceiverIdentityPublicKey: userIdentityPubkey.SerializeCompressed(),
 			ExpiryTime:                timestamppb.New(time.Now().Add(2 * time.Minute)),
 			TransferPackage:           transferPackage,
@@ -671,7 +678,7 @@ func RefundStaticDepositLegacy(
 		SspSignature:  []byte{},
 		Transfer: &pb.StartTransferRequest{
 			TransferId:                transferID.String(),
-			OwnerIdentityPublicKey:    config.IdentityPublicKey(),
+			OwnerIdentityPublicKey:    config.IdentityPublicKey().Serialize(),
 			ReceiverIdentityPublicKey: userIdentityPubkey.SerializeCompressed(),
 			ExpiryTime:                nil,
 			TransferPackage:           nil,
@@ -869,7 +876,7 @@ func ClaimStaticDeposit(
 		SspSignature:  sspSignature,
 		Transfer: &pb.StartTransferRequest{
 			TransferId:                transferID.String(),
-			OwnerIdentityPublicKey:    config.IdentityPublicKey(),
+			OwnerIdentityPublicKey:    config.IdentityPublicKey().Serialize(),
 			ReceiverIdentityPublicKey: userIdentityPubkey.SerializeCompressed(),
 			ExpiryTime:                timestamppb.New(time.Now().Add(2 * time.Minute)),
 			TransferPackage:           transferPackage,

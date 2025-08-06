@@ -391,7 +391,6 @@ pub fn construct_node_tx(
     };
 
     // Construct the transaction with version 2 for Taproot support
-    // FIXME
     let new_tx = Transaction {
         version: Version::TWO,
         lock_time: LockTime::ZERO,
@@ -401,7 +400,7 @@ pub fn construct_node_tx(
             TxOut {
                 // Ephemeral anchor output
                 value: Amount::from_sat(0),
-                script_pubkey: ScriptBuf::from_bytes(vec![0x51]), // OP_TRUE
+                script_pubkey: ScriptBuf::from_bytes(vec![0x51, 0x02, 0x4e, 0x73]), // Pay-to-anchor (P2A) ephemeral anchor output
             },
         ],
     };
@@ -487,7 +486,7 @@ pub fn construct_refund_tx(
             TxOut {
                 // Ephemeral anchor output
                 value: Amount::from_sat(0),
-                script_pubkey: ScriptBuf::from_bytes(vec![0x51]), // OP_TRUE
+                script_pubkey: ScriptBuf::from_bytes(vec![0x51, 0x02, 0x4e, 0x73]), // Pay-to-anchor (P2A) ephemeral anchor output
             },
         ],
     };

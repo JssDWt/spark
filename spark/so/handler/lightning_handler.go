@@ -9,6 +9,8 @@ import (
 	"math/big"
 	"strings"
 
+	"github.com/lightsparkdev/spark/common/keys"
+
 	"github.com/decred/dcrd/dcrec/secp256k1/v4"
 	"github.com/google/uuid"
 	"github.com/lightsparkdev/spark/common"
@@ -30,6 +32,7 @@ import (
 	"github.com/lightsparkdev/spark/so/ent/treenode"
 	"github.com/lightsparkdev/spark/so/helper"
 	decodepay "github.com/nbd-wtf/ln-decodepay"
+	"google.golang.org/grpc"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/emptypb"
 )
@@ -46,6 +49,13 @@ func NewLightningHandler(config *so.Config) *LightningHandler {
 
 // StorePreimageShare stores the preimage share for the given payment hash.
 func (h *LightningHandler) StorePreimageShare(ctx context.Context, req *pb.StorePreimageShareRequest) error {
+	if req.PreimageShare == nil {
+		return fmt.Errorf("preimage share is nil")
+	}
+	if len(req.PreimageShare.Proofs) == 0 {
+		return fmt.Errorf("preimage share proofs is empty")
+	}
+
 	err := secretsharing.ValidateShare(
 		&secretsharing.VerifiableSecretShare{
 			SecretShare: secretsharing.SecretShare{
@@ -93,7 +103,7 @@ func (h *LightningHandler) StorePreimageShare(ctx context.Context, req *pb.Store
 }
 
 func (h *LightningHandler) validateNodeOwnership(ctx context.Context, nodes []*ent.TreeNode) error {
-	if !h.config.AuthzEnforced() {
+	if !h.config.IsAuthzEnforced() {
 		return nil
 	}
 
@@ -123,7 +133,7 @@ func (h *LightningHandler) validateNodeOwnership(ctx context.Context, nodes []*e
 }
 
 func (h *LightningHandler) validateHasSession(ctx context.Context) error {
-	if h.config.AuthzEnforced() {
+	if h.config.IsAuthzEnforced() {
 		_, err := authn.GetSessionFromContext(ctx)
 		if err != nil {
 			return err
@@ -195,19 +205,106 @@ func (h *LightningHandler) GetSigningCommitments(ctx context.Context, req *pb.Ge
 	return &pb.GetSigningCommitmentsResponse{SigningCommitments: requestedCommitments}, nil
 }
 
-func (h *LightningHandler) validateGetPreimageRequest(
+func (h *LightningHandler) ValidateDuplicateLeaves(
+	ctx context.Context,
+	leavesToSend []*pb.UserSignedTxSigningJob,
+	directLeavesToSend []*pb.UserSignedTxSigningJob,
+	directFromCpfpLeavesToSend []*pb.UserSignedTxSigningJob,
+) error {
+	logger := logging.GetLoggerFromContext(ctx)
+	logger.Info("validating duplicate leaves", "leavesToSend", leavesToSend, "directLeavesToSend", directLeavesToSend, "directFromCpfpLeavesToSend", directFromCpfpLeavesToSend)
+	leavesMap := make(map[string]bool)
+	directLeavesMap := make(map[string]bool)
+	directFromCpfpLeavesMap := make(map[string]bool)
+	for _, leaf := range leavesToSend {
+		if leavesMap[leaf.LeafId] {
+			return fmt.Errorf("duplicate leaf id: %s", leaf.LeafId)
+		}
+		leavesMap[leaf.LeafId] = true
+	}
+	for _, leaf := range directLeavesToSend {
+		if directLeavesMap[leaf.LeafId] {
+			return fmt.Errorf("duplicate leaf id: %s", leaf.LeafId)
+		}
+		if !leavesMap[leaf.LeafId] {
+			return fmt.Errorf("leaf id %s not found in leaves to send", leaf.LeafId)
+		}
+		directLeavesMap[leaf.LeafId] = true
+	}
+	for _, leaf := range directFromCpfpLeavesToSend {
+		if directFromCpfpLeavesMap[leaf.LeafId] {
+			return fmt.Errorf("duplicate leaf id: %s", leaf.LeafId)
+		}
+		if !leavesMap[leaf.LeafId] {
+			return fmt.Errorf("leaf id %s not found in leaves to send", leaf.LeafId)
+		}
+		directFromCpfpLeavesMap[leaf.LeafId] = true
+	}
+	return nil
+}
+
+type frostServiceClientConnection interface {
+	StartFrostServiceClient(h *LightningHandler) (pbfrost.FrostServiceClient, error)
+	Close()
+}
+
+type defaultFrostServiceClientConnection struct {
+	conn *grpc.ClientConn
+}
+
+func (f *defaultFrostServiceClientConnection) StartFrostServiceClient(h *LightningHandler) (pbfrost.FrostServiceClient, error) {
+	var err error
+
+	if f.conn != nil {
+		return nil, fmt.Errorf("frost service client already started")
+	}
+
+	f.conn, err = common.NewGRPCConnectionWithoutTLS(h.config.SignerAddress, nil)
+	if err != nil {
+		return nil, fmt.Errorf("unable to connect to signer: %w", err)
+	}
+
+	return pbfrost.NewFrostServiceClient(f.conn), nil
+}
+
+func (f *defaultFrostServiceClientConnection) Close() {
+	// The only caller is a defer and doesn't handle errors
+	_ = f.conn.Close()
+}
+
+func (h *LightningHandler) ValidateGetPreimageRequest(
 	ctx context.Context,
 	paymentHash []byte,
 	cpfpTransactions []*pb.UserSignedTxSigningJob,
 	directTransactions []*pb.UserSignedTxSigningJob,
 	directFromCpfpTransactions []*pb.UserSignedTxSigningJob,
 	amount *pb.InvoiceAmount,
-	destinationPubkey []byte,
+	destinationPubkeyBytes []byte,
 	feeSats uint64,
 	reason pb.InitiatePreimageSwapRequest_Reason,
+	validateNodeOwnership bool,
+) error {
+	return h.validateGetPreimageRequestWithFrostServiceClientFactory(ctx, &defaultFrostServiceClientConnection{}, paymentHash, cpfpTransactions, directTransactions, directFromCpfpTransactions, amount, destinationPubkeyBytes, feeSats, reason, validateNodeOwnership)
+}
+
+func (h *LightningHandler) validateGetPreimageRequestWithFrostServiceClientFactory(
+	ctx context.Context,
+	frostServiceClientConnection frostServiceClientConnection,
+	paymentHash []byte,
+	cpfpTransactions []*pb.UserSignedTxSigningJob,
+	directTransactions []*pb.UserSignedTxSigningJob,
+	directFromCpfpTransactions []*pb.UserSignedTxSigningJob,
+	amount *pb.InvoiceAmount,
+	destinationPubKeyBytes []byte,
+	feeSats uint64,
+	reason pb.InitiatePreimageSwapRequest_Reason,
+	validateNodeOwnership bool,
 ) error {
 	logger := logging.GetLoggerFromContext(ctx)
-
+	destinationPubKey, err := keys.ParsePublicKey(destinationPubKeyBytes)
+	if err != nil {
+		return fmt.Errorf("invalid destination public key: %w", err)
+	}
 	// Step 0 Validate that there's no existing preimage request for this payment hash
 	tx, err := ent.GetDbFromContext(ctx)
 	if err != nil {
@@ -215,24 +312,25 @@ func (h *LightningHandler) validateGetPreimageRequest(
 	}
 	preimageRequests, err := tx.PreimageRequest.Query().Where(
 		preimagerequest.PaymentHashEQ(paymentHash),
-		preimagerequest.ReceiverIdentityPubkeyEQ(destinationPubkey),
+		preimagerequest.ReceiverIdentityPubkeyEQ(destinationPubKey.Serialize()),
 		preimagerequest.StatusNEQ(st.PreimageRequestStatusReturned),
 	).All(ctx)
 	if err != nil {
-		return fmt.Errorf("unable to get preimage request: %w", err)
+		return fmt.Errorf("unable to get preimage request with paymentHash %x: %w ", paymentHash, err)
 	}
 	if len(preimageRequests) > 0 {
-		return fmt.Errorf("preimage request already exists")
+		return fmt.Errorf("preimage request already exists for paymentHash %x", paymentHash)
 	}
 
 	// Step 1 validate all signatures are valid
-	conn, err := common.NewGRPCConnectionWithoutTLS(h.config.SignerAddress, nil)
+	client, err := frostServiceClientConnection.StartFrostServiceClient(h)
 	if err != nil {
-		return fmt.Errorf("unable to connect to signer: %w", err)
+		return fmt.Errorf("unable to start frost service client: %w", err)
 	}
-	defer conn.Close()
+	defer frostServiceClientConnection.Close()
 
-	client := pbfrost.NewFrostServiceClient(conn)
+	nodes := make([]*ent.TreeNode, 0)
+	// Validate CPFP transaction.
 	for i := range cpfpTransactions {
 		cpfpTransaction := cpfpTransactions[i]
 
@@ -240,58 +338,60 @@ func (h *LightningHandler) validateGetPreimageRequest(
 			return fmt.Errorf("cpfp transaction is nil")
 		}
 
-		if cpfpTransaction.SigningCommitments == nil {
-			return fmt.Errorf("signing commitments is nil")
-		}
-
-		if cpfpTransaction.SigningNonceCommitment == nil {
-			return fmt.Errorf("signing nonce commitment is nil")
-		}
-
 		// First fetch the node tx in order to calculate the sighash
 		nodeID, err := uuid.Parse(cpfpTransaction.LeafId)
 		if err != nil {
 			return fmt.Errorf("unable to parse node id: %w", err)
 		}
+
+		if cpfpTransaction.SigningCommitments == nil {
+			return fmt.Errorf("signing commitments is nil for cpfpTransaction, leaf_id: %s", nodeID)
+		}
+
+		if cpfpTransaction.SigningNonceCommitment == nil {
+			return fmt.Errorf("signing nonce commitment is nil for cpfpTransaction, leaf_id: %s", nodeID)
+		}
+
 		node, err := tx.TreeNode.Get(ctx, nodeID)
 		if err != nil {
-			return fmt.Errorf("unable to get node: %w", err)
+			return fmt.Errorf("unable to get cpfpTransaction tree_node with id: %s: %w", nodeID, err)
 		}
+		nodes = append(nodes, node)
 		if node.Status != st.TreeNodeStatusAvailable {
 			return fmt.Errorf("node %v is not available: %v", node.ID, node.Status)
 		}
 		keyshare, err := node.QuerySigningKeyshare().First(ctx)
 		if err != nil {
-			return fmt.Errorf("unable to get keyshare: %w", err)
+			return fmt.Errorf("unable to get keyshare for cpfpTransaction, tree_node id: %s: %w", nodeID, err)
 		}
 		cpfpTx, err := common.TxFromRawTxBytes(node.RawTx)
 		if err != nil {
-			return fmt.Errorf("unable to get tx: %w", err)
+			return fmt.Errorf("unable to get cpfpTx for cpfpTransaction, tree_node id: %s: %w", nodeID, err)
 		}
 
 		cpfpRefundTx, err := common.TxFromRawTxBytes(cpfpTransaction.RawTx)
 		if err != nil {
-			return fmt.Errorf("unable to get cpfp refund tx: %w", err)
+			return fmt.Errorf("unable to get cpfp refund tx for cpfpTransaction, tree_node id: %s: %w", nodeID, err)
 		}
 
 		if len(cpfpTx.TxOut) <= 0 {
-			return fmt.Errorf("vout out of bounds")
+			return fmt.Errorf("cpfpTx vout out of bounds for cpfpTransaction, tree_node id: %s", nodeID)
 		}
 		cpfpSighash, err := common.SigHashFromTx(cpfpRefundTx, 0, cpfpTx.TxOut[0])
 		if err != nil {
-			return fmt.Errorf("unable to get cpfp sighash: %w", err)
+			return fmt.Errorf("unable to get cpfp sighash for cpfpTransaction, tree_node id: %s: %w", nodeID, err)
 		}
 
 		realUserPublicKey, err := common.SubtractPublicKeys(node.VerifyingPubkey, keyshare.PublicKey)
 		if err != nil {
-			return fmt.Errorf("unable to get real user public key: %w", err)
+			return fmt.Errorf("unable to get real user public key for cpfpTransaction, tree_node id: %s: %w", nodeID, err)
 		}
 
 		if !bytes.Equal(realUserPublicKey, node.OwnerSigningPubkey) {
 			logger.Debug("real user public key mismatch", "expected", hex.EncodeToString(node.OwnerSigningPubkey), "got", hex.EncodeToString(realUserPublicKey))
 			node, err = node.Update().SetOwnerSigningPubkey(realUserPublicKey).Save(ctx)
 			if err != nil {
-				return fmt.Errorf("unable to update node: %w", err)
+				return fmt.Errorf("unable to update tree_node: %s: %w", nodeID, err)
 			}
 		}
 
@@ -307,81 +407,133 @@ func (h *LightningHandler) validateGetPreimageRequest(
 		if err != nil {
 			return fmt.Errorf("unable to validate cpfp signature share: %w, for sighash: %v, user pubkey: %v", err, hex.EncodeToString(cpfpSighash), hex.EncodeToString(node.OwnerSigningPubkey))
 		}
+	}
 
-		if len(directTransactions) > 0 && len(directFromCpfpTransactions) > 0 {
-			directTransaction := directTransactions[i]
-			directFromCpfpTransaction := directFromCpfpTransactions[i]
-			if directTransaction == nil {
-				return fmt.Errorf("direct transaction is nil")
-			}
-			if directFromCpfpTransaction == nil {
-				return fmt.Errorf("direct from cpfp transaction is nil")
-			}
-			if directTransaction.SigningCommitments == nil {
-				return fmt.Errorf("signing commitments is nil")
-			}
-			if directFromCpfpTransaction.SigningCommitments == nil {
-				return fmt.Errorf("signing commitments is nil")
-			}
-			if directTransaction.SigningNonceCommitment == nil {
-				return fmt.Errorf("signing nonce commitment is nil")
-			}
-			if directFromCpfpTransaction.SigningNonceCommitment == nil {
-				return fmt.Errorf("signing nonce commitment is nil")
-			}
-			directTx, err := common.TxFromRawTxBytes(node.DirectTx)
-			if err != nil {
-				return fmt.Errorf("unable to get tx: %w", err)
-			}
-			directRefundTx, err := common.TxFromRawTxBytes(directTransaction.RawTx)
-			if err != nil {
-				return fmt.Errorf("unable to get cpfp refund tx: %w", err)
-			}
-			directFromCpfpRefundTx, err := common.TxFromRawTxBytes(directFromCpfpTransaction.RawTx)
-			if err != nil {
-				return fmt.Errorf("unable to get direct from cpfp refund tx: %w", err)
-			}
-			directSighash, err := common.SigHashFromTx(directRefundTx, 0, directTx.TxOut[0])
-			if err != nil {
-				return fmt.Errorf("unable to get direct sighash: %w", err)
-			}
-			directFromCpfpSighash, err := common.SigHashFromTx(directFromCpfpRefundTx, 0, cpfpTx.TxOut[0])
-			if err != nil {
-				return fmt.Errorf("unable to get direct from cpfp sighash: %w", err)
-			}
-			_, err = client.ValidateSignatureShare(ctx, &pbfrost.ValidateSignatureShareRequest{
-				Message:         directSighash,
-				SignatureShare:  directTransaction.UserSignature,
-				Role:            pbfrost.SigningRole_USER,
-				VerifyingKey:    node.VerifyingPubkey,
-				PublicShare:     node.OwnerSigningPubkey,
-				Commitments:     directTransaction.SigningCommitments.SigningCommitments,
-				UserCommitments: directTransaction.SigningNonceCommitment,
-			})
-			if err != nil {
-				return fmt.Errorf("unable to validate direct signature share: %w, for sighash: %v, user pubkey: %v", err, hex.EncodeToString(cpfpSighash), hex.EncodeToString(node.OwnerSigningPubkey))
-			}
-			_, err = client.ValidateSignatureShare(ctx, &pbfrost.ValidateSignatureShareRequest{
-				Message:         directFromCpfpSighash,
-				SignatureShare:  directFromCpfpTransaction.UserSignature,
-				Role:            pbfrost.SigningRole_USER,
-				VerifyingKey:    node.VerifyingPubkey,
-				PublicShare:     node.OwnerSigningPubkey,
-				Commitments:     directFromCpfpTransaction.SigningCommitments.SigningCommitments,
-				UserCommitments: directFromCpfpTransaction.SigningNonceCommitment,
-			})
-			if err != nil {
-				return fmt.Errorf("unable to validate direct from cpfp signature share: %w, for sighash: %v, user pubkey: %v", err, hex.EncodeToString(cpfpSighash), hex.EncodeToString(node.OwnerSigningPubkey))
-			}
+	// Only validate direct and direct-from-cpfp transactions if both are present
+	for i := range directTransactions {
+		directTransaction := directTransactions[i]
+
+		if directTransaction == nil {
+			return fmt.Errorf("direct transaction is nil")
+		}
+
+		nodeID, err := uuid.Parse(directTransaction.LeafId)
+		if err != nil {
+			return fmt.Errorf("unable to parse node id: %w", err)
+		}
+
+		if directTransaction.SigningCommitments == nil {
+			return fmt.Errorf("signing commitments is nil for directTransaction, leaf_id: %s", nodeID)
+		}
+
+		if directTransaction.SigningNonceCommitment == nil {
+			return fmt.Errorf("signing nonce commitment is nil for directTransaction, leaf_id: %s", nodeID)
+		}
+
+		node, err := tx.TreeNode.Get(ctx, nodeID)
+		if err != nil {
+			return fmt.Errorf("unable to get tree_node with id: %s: %w", nodeID, err)
+		}
+
+		directTx, err := common.TxFromRawTxBytes(node.DirectTx)
+		if err != nil {
+			return fmt.Errorf("unable to get directTx for directTransaction, tree_node id: %s: %w", nodeID, err)
+		}
+		directRefundTx, err := common.TxFromRawTxBytes(directTransaction.RawTx)
+		if err != nil {
+			return fmt.Errorf("unable to get direct refund tx for directTransaction, tree_node id: %s: %w", nodeID, err)
+		}
+		if len(directTx.TxOut) <= 0 {
+			return fmt.Errorf("direct tx vout out of bounds for directTransaction, tree_node id: %s", nodeID)
+		}
+		directSighash, err := common.SigHashFromTx(directRefundTx, 0, directTx.TxOut[0])
+		if err != nil {
+			return fmt.Errorf("unable to get direct sighash for directTransaction, tree_node id: %s: %w", nodeID, err)
+		}
+
+		_, err = client.ValidateSignatureShare(ctx, &pbfrost.ValidateSignatureShareRequest{
+			Message:         directSighash,
+			SignatureShare:  directTransaction.UserSignature,
+			Role:            pbfrost.SigningRole_USER,
+			VerifyingKey:    node.VerifyingPubkey,
+			PublicShare:     node.OwnerSigningPubkey,
+			Commitments:     directTransaction.SigningCommitments.SigningCommitments,
+			UserCommitments: directTransaction.SigningNonceCommitment,
+		})
+		if err != nil {
+			return fmt.Errorf("unable to validate direct signature share: %w, for sighash: %v, user pubkey: %v", err, hex.EncodeToString(directSighash), hex.EncodeToString(node.OwnerSigningPubkey))
+		}
+	}
+
+	// Validate direct-from-cpfp transactions
+	for i := range directFromCpfpTransactions {
+		directFromCpfpTransaction := directFromCpfpTransactions[i]
+		if directFromCpfpTransaction == nil {
+			return fmt.Errorf("direct from cpfp transaction is nil")
+		}
+
+		nodeID, err := uuid.Parse(directFromCpfpTransaction.LeafId)
+		if err != nil {
+			return fmt.Errorf("unable to parse node id for directFromCpfpTransaction: %w", err)
+		}
+
+		if directFromCpfpTransaction.SigningCommitments == nil {
+			return fmt.Errorf("signing commitments is nil for directFromCpfpTransaction, leaf_id: %s", nodeID)
+		}
+
+		if directFromCpfpTransaction.SigningNonceCommitment == nil {
+			return fmt.Errorf("signing nonce commitment is nil for directFromCpfpTransaction, leaf_id: %s", nodeID)
+		}
+
+		node, err := tx.TreeNode.Get(ctx, nodeID)
+		if err != nil {
+			return fmt.Errorf("unable to get tree_node with id: %s for directFromCpfpTransaction: %w", nodeID, err)
+		}
+
+		cpfpTx, err := common.TxFromRawTxBytes(node.RawTx)
+		if err != nil {
+			return fmt.Errorf("unable to get cpfpTx for directFromCpfpTransaction, tree_node id: %s: %w", nodeID, err)
+		}
+		directFromCpfpRefundTx, err := common.TxFromRawTxBytes(directFromCpfpTransaction.RawTx)
+		if err != nil {
+			return fmt.Errorf("unable to get direct from cpfp refund tx for directFromCpfpTransaction, tree_node id: %s: %w", nodeID, err)
+		}
+		if len(cpfpTx.TxOut) <= 0 {
+			return fmt.Errorf("direct from cpfp vout out of bounds for directFromCpfpTransaction, tree_node id: %s", nodeID)
+		}
+		directFromCpfpSighash, err := common.SigHashFromTx(directFromCpfpRefundTx, 0, cpfpTx.TxOut[0])
+		if err != nil {
+			return fmt.Errorf("unable to get direct from cpfp sighash for directFromCpfpTransaction, tree_node id: %s: %w", nodeID, err)
+		}
+
+		_, err = client.ValidateSignatureShare(ctx, &pbfrost.ValidateSignatureShareRequest{
+			Message:         directFromCpfpSighash,
+			SignatureShare:  directFromCpfpTransaction.UserSignature,
+			Role:            pbfrost.SigningRole_USER,
+			VerifyingKey:    node.VerifyingPubkey,
+			PublicShare:     node.OwnerSigningPubkey,
+			Commitments:     directFromCpfpTransaction.SigningCommitments.SigningCommitments,
+			UserCommitments: directFromCpfpTransaction.SigningNonceCommitment,
+		})
+		if err != nil {
+			return fmt.Errorf("unable to validate direct from cpfp signature share: %w, for sighash: %v, user pubkey: %v", err, hex.EncodeToString(directFromCpfpSighash), hex.EncodeToString(node.OwnerSigningPubkey))
+		}
+	}
+
+	if validateNodeOwnership {
+		err = h.validateNodeOwnership(ctx, nodes)
+		if err != nil {
+			return fmt.Errorf("unable to validate node ownership: %w", err)
 		}
 	}
 
 	// Step 2 validate the amount is correct and paid to the destination pubkey
-	destinationPubkeyBytes, err := secp256k1.ParsePubKey(destinationPubkey)
 	if err != nil {
 		return fmt.Errorf("unable to parse destination pubkey: %w", err)
 	}
 	var totalAmount uint64
+
+	// Validate CPFP transactions
 	for i := range cpfpTransactions {
 		cpfpTransaction := cpfpTransactions[i]
 		cpfpRefundTx, err := common.TxFromRawTxBytes(cpfpTransaction.RawTx)
@@ -389,42 +541,59 @@ func (h *LightningHandler) validateGetPreimageRequest(
 			return fmt.Errorf("unable to get cpfp refund tx: %w", err)
 		}
 
-		pubkeyScript, err := common.P2TRScriptFromPubKey(destinationPubkeyBytes)
+		pubkeyScript, err := common.P2TRScriptFromPubKey(destinationPubKey)
 		if err != nil {
 			return fmt.Errorf("unable to extract pubkey from tx: %w", err)
 		}
 		if len(cpfpRefundTx.TxOut) <= 0 {
-			return fmt.Errorf("vout out of bounds")
+			return fmt.Errorf("cpfp tx vout out of bounds")
 		}
 		if !bytes.Equal(pubkeyScript, cpfpRefundTx.TxOut[0].PkScript) {
 			return fmt.Errorf("invalid cpfp destination pubkey")
 		}
 		totalAmount += uint64(cpfpRefundTx.TxOut[0].Value)
-		if len(directTransactions) > 0 && len(directFromCpfpTransactions) > 0 {
-			directTransaction := directTransactions[i]
-			directFromCpfpTransaction := directFromCpfpTransactions[i]
-			directRefundTx, err := common.TxFromRawTxBytes(directTransaction.RawTx)
-			if err != nil {
-				return fmt.Errorf("unable to get direct refund tx: %w", err)
-			}
-			directFromCpfpRefundTx, err := common.TxFromRawTxBytes(directFromCpfpTransaction.RawTx)
-			if err != nil {
-				return fmt.Errorf("unable to get direct from cpfp refund tx: %w", err)
-			}
-			if len(directRefundTx.TxOut) <= 0 {
-				return fmt.Errorf("vout out of bounds")
-			}
-			if len(directFromCpfpRefundTx.TxOut) <= 0 {
-				return fmt.Errorf("vout out of bounds")
-			}
-			if !bytes.Equal(pubkeyScript, directRefundTx.TxOut[0].PkScript) {
-				return fmt.Errorf("invalid direct destination pubkey")
-			}
-			if !bytes.Equal(pubkeyScript, directFromCpfpRefundTx.TxOut[0].PkScript) {
-				return fmt.Errorf("invalid direct from cpfp destination pubkey")
-			}
+	}
+
+	// Validate direct transactions
+	for i := range directTransactions {
+		directTransaction := directTransactions[i]
+		directRefundTx, err := common.TxFromRawTxBytes(directTransaction.RawTx)
+		if err != nil {
+			return fmt.Errorf("unable to get direct refund tx for directTransaction leaf_id: %s: %w", directTransaction.LeafId, err)
+		}
+
+		pubkeyScript, err := common.P2TRScriptFromPubKey(destinationPubKey)
+		if err != nil {
+			return fmt.Errorf("unable to extract pubkey from tx for directTransaction leaf_id: %s: %w", directTransaction.LeafId, err)
+		}
+		if len(directRefundTx.TxOut) <= 0 {
+			return fmt.Errorf("direct tx vout out of bounds for directTransaction leaf_id: %s", directTransaction.LeafId)
+		}
+		if !bytes.Equal(pubkeyScript, directRefundTx.TxOut[0].PkScript) {
+			return fmt.Errorf("invalid direct destination pubkey for directTransaction leaf_id: %s", directTransaction.LeafId)
 		}
 	}
+
+	// Validate direct-from-cpfp transactions
+	for i := range directFromCpfpTransactions {
+		directFromCpfpTransaction := directFromCpfpTransactions[i]
+		directFromCpfpRefundTx, err := common.TxFromRawTxBytes(directFromCpfpTransaction.RawTx)
+		if err != nil {
+			return fmt.Errorf("unable to get direct from cpfp refund tx for directFromCpfpTransaction leaf_id: %s: %w", directFromCpfpTransaction.LeafId, err)
+		}
+
+		pubkeyScript, err := common.P2TRScriptFromPubKey(destinationPubKey)
+		if err != nil {
+			return fmt.Errorf("unable to extract pubkey from tx for directFromCpfpTransaction leaf_id: %s: %w", directFromCpfpTransaction.LeafId, err)
+		}
+		if len(directFromCpfpRefundTx.TxOut) <= 0 {
+			return fmt.Errorf("direct from cpfp tx vout out of bounds for directFromCpfpTransaction leaf_id: %s", directFromCpfpTransaction.LeafId)
+		}
+		if !bytes.Equal(pubkeyScript, directFromCpfpRefundTx.TxOut[0].PkScript) {
+			return fmt.Errorf("invalid direct from cpfp destination pubkey for directFromCpfpTransaction leaf_id: %s", directFromCpfpTransaction.LeafId)
+		}
+	}
+
 	if reason == pb.InitiatePreimageSwapRequest_REASON_SEND {
 		totalAmount -= feeSats
 	}
@@ -462,6 +631,7 @@ func (h *LightningHandler) storeUserSignedTransactions(
 		return nil, fmt.Errorf("unable to create preimage request: %w", err)
 	}
 
+	// Store CPFP transactions
 	for i := range cpfpTransactions {
 		cpfpTransaction := cpfpTransactions[i]
 		cpfpCommitmentsBytes, err := proto.Marshal(cpfpTransaction.SigningCommitments)
@@ -497,49 +667,64 @@ func (h *LightningHandler) storeUserSignedTransactions(
 		if err != nil {
 			return nil, fmt.Errorf("unable to update node status: %w", err)
 		}
-		if len(directTransactions) > 0 && len(directFromCpfpTransactions) > 0 {
-			directTransaction := directTransactions[i]
-			directFromCpfpTransaction := directFromCpfpTransactions[i]
-			directCommitmentsBytes, err := proto.Marshal(directTransaction.SigningCommitments)
-			if err != nil {
-				return nil, fmt.Errorf("unable to marshal signing commitments: %w", err)
-			}
-			directFromCpfpCommitmentsBytes, err := proto.Marshal(directFromCpfpTransaction.SigningCommitments)
-			if err != nil {
-				return nil, fmt.Errorf("unable to marshal signing commitments: %w", err)
-			}
-			directUserSignatureCommitmentBytes, err := proto.Marshal(directTransaction.SigningNonceCommitment)
-			if err != nil {
-				return nil, fmt.Errorf("unable to marshal direct user signature commitment: %w", err)
-			}
-			directFromCpfpUserSignatureCommitmentBytes, err := proto.Marshal(directFromCpfpTransaction.SigningNonceCommitment)
-			if err != nil {
-				return nil, fmt.Errorf("unable to marshal direct from cpfp user signature commitment: %w", err)
-			}
-			_, err = tx.UserSignedTransaction.Create().
-				SetTransaction(directTransaction.RawTx).
-				SetUserSignature(directTransaction.UserSignature).
-				SetUserSignatureCommitment(directUserSignatureCommitmentBytes).
-				SetSigningCommitments(directCommitmentsBytes).
-				SetPreimageRequest(preimageRequest).
-				SetTreeNodeID(nodeID).
-				Save(ctx)
-			if err != nil {
-				return nil, fmt.Errorf("unable to store user signed transaction: %w", err)
-			}
-			_, err = tx.UserSignedTransaction.Create().
-				SetTransaction(directFromCpfpTransaction.RawTx).
-				SetUserSignature(directFromCpfpTransaction.UserSignature).
-				SetUserSignatureCommitment(directFromCpfpUserSignatureCommitmentBytes).
-				SetSigningCommitments(directFromCpfpCommitmentsBytes).
-				SetPreimageRequest(preimageRequest).
-				SetTreeNodeID(nodeID).
-				Save(ctx)
-			if err != nil {
-				return nil, fmt.Errorf("unable to store user signed transaction: %w", err)
-			}
+	}
+
+	// Store direct transactions if present
+	for i := range directTransactions {
+		directTransaction := directTransactions[i]
+		directCommitmentsBytes, err := proto.Marshal(directTransaction.SigningCommitments)
+		if err != nil {
+			return nil, fmt.Errorf("unable to marshal signing commitments: %w", err)
+		}
+		nodeID, err := uuid.Parse(directTransaction.LeafId)
+		if err != nil {
+			return nil, fmt.Errorf("unable to parse node id: %w", err)
+		}
+		directUserSignatureCommitmentBytes, err := proto.Marshal(directTransaction.SigningNonceCommitment)
+		if err != nil {
+			return nil, fmt.Errorf("unable to marshal direct user signature commitment: %w", err)
+		}
+		_, err = tx.UserSignedTransaction.Create().
+			SetTransaction(directTransaction.RawTx).
+			SetUserSignature(directTransaction.UserSignature).
+			SetUserSignatureCommitment(directUserSignatureCommitmentBytes).
+			SetSigningCommitments(directCommitmentsBytes).
+			SetPreimageRequest(preimageRequest).
+			SetTreeNodeID(nodeID).
+			Save(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("unable to store user signed transaction: %w", err)
 		}
 	}
+
+	// Store direct-from-cpfp transactions if present
+	for i := range directFromCpfpTransactions {
+		directFromCpfpTransaction := directFromCpfpTransactions[i]
+		directFromCpfpCommitmentsBytes, err := proto.Marshal(directFromCpfpTransaction.SigningCommitments)
+		if err != nil {
+			return nil, fmt.Errorf("unable to marshal signing commitments: %w", err)
+		}
+		nodeID, err := uuid.Parse(directFromCpfpTransaction.LeafId)
+		if err != nil {
+			return nil, fmt.Errorf("unable to parse node id: %w", err)
+		}
+		directFromCpfpUserSignatureCommitmentBytes, err := proto.Marshal(directFromCpfpTransaction.SigningNonceCommitment)
+		if err != nil {
+			return nil, fmt.Errorf("unable to marshal direct from cpfp user signature commitment: %w", err)
+		}
+		_, err = tx.UserSignedTransaction.Create().
+			SetTransaction(directFromCpfpTransaction.RawTx).
+			SetUserSignature(directFromCpfpTransaction.UserSignature).
+			SetUserSignatureCommitment(directFromCpfpUserSignatureCommitmentBytes).
+			SetSigningCommitments(directFromCpfpCommitmentsBytes).
+			SetPreimageRequest(preimageRequest).
+			SetTreeNodeID(nodeID).
+			Save(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("unable to store user signed transaction: %w", err)
+		}
+	}
+
 	return preimageRequest, nil
 }
 
@@ -578,7 +763,12 @@ func (h *LightningHandler) GetPreimageShare(ctx context.Context, req *pb.Initiat
 		}
 	}
 
-	err := h.validateGetPreimageRequest(
+	err := h.ValidateDuplicateLeaves(ctx, req.Transfer.LeavesToSend, req.Transfer.DirectLeavesToSend, req.Transfer.DirectFromCpfpLeavesToSend)
+	if err != nil {
+		return nil, fmt.Errorf("unable to validate duplicate leaves: %w", err)
+	}
+
+	err = h.ValidateGetPreimageRequest(
 		ctx,
 		req.PaymentHash,
 		req.Transfer.LeavesToSend,
@@ -588,9 +778,10 @@ func (h *LightningHandler) GetPreimageShare(ctx context.Context, req *pb.Initiat
 		req.ReceiverIdentityPublicKey,
 		req.FeeSats,
 		req.Reason,
+		false,
 	)
 	if err != nil {
-		return nil, fmt.Errorf("unable to validate request: %w", err)
+		return nil, fmt.Errorf("unable to validate get preimage request: %w", err)
 	}
 
 	cpfpLeafRefundMap := make(map[string][]byte)
@@ -599,12 +790,14 @@ func (h *LightningHandler) GetPreimageShare(ctx context.Context, req *pb.Initiat
 	for i := range req.Transfer.LeavesToSend {
 		cpfpTransaction := req.Transfer.LeavesToSend[i]
 		cpfpLeafRefundMap[cpfpTransaction.LeafId] = cpfpTransaction.RawTx
-		if len(req.Transfer.DirectLeavesToSend) > 0 && len(req.Transfer.DirectFromCpfpLeavesToSend) > 0 {
-			directTransaction := req.Transfer.DirectLeavesToSend[i]
-			directFromCpfpTransaction := req.Transfer.DirectFromCpfpLeavesToSend[i]
-			directLeafRefundMap[directTransaction.LeafId] = directTransaction.RawTx
-			directFromCpfpLeafRefundMap[directFromCpfpTransaction.LeafId] = directFromCpfpTransaction.RawTx
-		}
+	}
+	for i := range req.Transfer.DirectLeavesToSend {
+		directTransaction := req.Transfer.DirectLeavesToSend[i]
+		directLeafRefundMap[directTransaction.LeafId] = directTransaction.RawTx
+	}
+	for i := range req.Transfer.DirectFromCpfpLeavesToSend {
+		directFromCpfpTransaction := req.Transfer.DirectFromCpfpLeavesToSend[i]
+		directFromCpfpLeafRefundMap[directFromCpfpTransaction.LeafId] = directFromCpfpTransaction.RawTx
 	}
 
 	transferHandler := NewTransferHandler(h.config)
@@ -685,10 +878,10 @@ func (h *LightningHandler) initiatePreimageSwap(ctx context.Context, req *pb.Ini
 		}
 		preimageShare, err = tx.PreimageShare.Query().Where(preimageshare.PaymentHash(req.PaymentHash)).First(ctx)
 		if err != nil {
-			return nil, fmt.Errorf("unable to get preimage share: %w", err)
+			return nil, fmt.Errorf("unable to get preimage share for payment hash: %x: %w", req.PaymentHash, err)
 		}
 		if !bytes.Equal(preimageShare.OwnerIdentityPubkey, req.ReceiverIdentityPublicKey) {
-			return nil, fmt.Errorf("preimage share owner identity public key mismatch")
+			return nil, fmt.Errorf("preimage share owner identity public key mismatch for payment hash: %x", req.PaymentHash)
 		}
 	}
 
@@ -708,7 +901,12 @@ func (h *LightningHandler) initiatePreimageSwap(ctx context.Context, req *pb.Ini
 		}
 	}
 
-	err := h.validateGetPreimageRequest(
+	err := h.ValidateDuplicateLeaves(ctx, req.Transfer.LeavesToSend, req.Transfer.DirectLeavesToSend, req.Transfer.DirectFromCpfpLeavesToSend)
+	if err != nil {
+		return nil, fmt.Errorf("unable to validate duplicate leaves: %w", err)
+	}
+
+	err = h.ValidateGetPreimageRequest(
 		ctx,
 		req.PaymentHash,
 		req.Transfer.LeavesToSend,
@@ -718,9 +916,10 @@ func (h *LightningHandler) initiatePreimageSwap(ctx context.Context, req *pb.Ini
 		req.ReceiverIdentityPublicKey,
 		req.FeeSats,
 		req.Reason,
+		true,
 	)
 	if err != nil {
-		return nil, fmt.Errorf("unable to validate request: %w", err)
+		return nil, fmt.Errorf("unable to validate request for payment hash: %x: %w", req.PaymentHash, err)
 	}
 
 	cpfpLeafRefundMap := make(map[string][]byte)
@@ -729,12 +928,14 @@ func (h *LightningHandler) initiatePreimageSwap(ctx context.Context, req *pb.Ini
 	for i := range req.Transfer.LeavesToSend {
 		cpfpTransaction := req.Transfer.LeavesToSend[i]
 		cpfpLeafRefundMap[cpfpTransaction.LeafId] = cpfpTransaction.RawTx
-		if len(req.Transfer.DirectLeavesToSend) > 0 && len(req.Transfer.DirectFromCpfpLeavesToSend) > 0 {
-			directTransaction := req.Transfer.DirectLeavesToSend[i]
-			directFromCpfpTransaction := req.Transfer.DirectFromCpfpLeavesToSend[i]
-			directLeafRefundMap[directTransaction.LeafId] = directTransaction.RawTx
-			directFromCpfpLeafRefundMap[directFromCpfpTransaction.LeafId] = directFromCpfpTransaction.RawTx
-		}
+	}
+	for i := range req.Transfer.DirectLeavesToSend {
+		directTransaction := req.Transfer.DirectLeavesToSend[i]
+		directLeafRefundMap[directTransaction.LeafId] = directTransaction.RawTx
+	}
+	for i := range req.Transfer.DirectFromCpfpLeavesToSend {
+		directFromCpfpTransaction := req.Transfer.DirectFromCpfpLeavesToSend[i]
+		directFromCpfpLeafRefundMap[directFromCpfpTransaction.LeafId] = directFromCpfpTransaction.RawTx
 	}
 
 	transferHandler := NewTransferHandler(h.config)
@@ -753,7 +954,7 @@ func (h *LightningHandler) initiatePreimageSwap(ctx context.Context, req *pb.Ini
 		requireDirectTx,
 	)
 	if err != nil {
-		return nil, fmt.Errorf("unable to create transfer: %w", err)
+		return nil, fmt.Errorf("unable to create transfer for payment hash: %x: %w", req.PaymentHash, err)
 	}
 
 	var status st.PreimageRequestStatus
@@ -764,7 +965,7 @@ func (h *LightningHandler) initiatePreimageSwap(ctx context.Context, req *pb.Ini
 	}
 	preimageRequest, err := h.storeUserSignedTransactions(ctx, req.PaymentHash, preimageShare, req.Transfer.LeavesToSend, req.Transfer.DirectLeavesToSend, req.Transfer.DirectFromCpfpLeavesToSend, transfer, status, req.ReceiverIdentityPublicKey)
 	if err != nil {
-		return nil, fmt.Errorf("unable to store user signed transactions: %w", err)
+		return nil, fmt.Errorf("unable to store user signed transactions for payment hash: %x and transfer id: %s: %w", req.PaymentHash, transfer.ID.String(), err)
 	}
 
 	selection := helper.OperatorSelection{Option: helper.OperatorSelectionOptionExcludeSelf}
@@ -778,7 +979,7 @@ func (h *LightningHandler) initiatePreimageSwap(ctx context.Context, req *pb.Ini
 		client := pbinternal.NewSparkInternalServiceClient(conn)
 		response, err := client.InitiatePreimageSwap(ctx, req)
 		if err != nil {
-			return nil, fmt.Errorf("unable to initiate preimage swap: %w", err)
+			return nil, fmt.Errorf("unable to initiate preimage swap for payment hash: %x and transfer id: %s: %w", req.PaymentHash, transfer.ID.String(), err)
 		}
 		return response.PreimageShare, nil
 	})
@@ -794,7 +995,7 @@ func (h *LightningHandler) initiatePreimageSwap(ctx context.Context, req *pb.Ini
 
 	transferProto, err := transfer.MarshalProto(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("unable to marshal transfer: %w", err)
+		return nil, fmt.Errorf("unable to marshal transfer for payment hash: %x and transfer id: %s: %w", req.PaymentHash, transfer.ID.String(), err)
 	}
 
 	// Recover secret if necessary
@@ -821,7 +1022,7 @@ func (h *LightningHandler) initiatePreimageSwap(ctx context.Context, req *pb.Ini
 
 	secret, err := secretsharing.RecoverSecret(shares)
 	if err != nil {
-		return nil, fmt.Errorf("unable to recover secret: %w", err)
+		return nil, fmt.Errorf("unable to recover secret for payment hash: %x and transfer id: %s: %w", req.PaymentHash, transfer.ID.String(), err)
 	}
 
 	secretBytes := secret.Bytes()
@@ -834,14 +1035,17 @@ func (h *LightningHandler) initiatePreimageSwap(ctx context.Context, req *pb.Ini
 		baseHandler := NewBaseTransferHandler(h.config)
 		err := baseHandler.CreateCancelTransferGossipMessage(ctx, transfer.ID.String())
 		if err != nil {
-			logger.Error("InitiatePreimageSwap: unable to cancel own send transfer", "error", err)
+			logger.Error("InitiatePreimageSwap: unable to cancel own send transfer",
+				"error", err,
+				"payment_hash", hex.EncodeToString(req.PaymentHash),
+				"transfer_id", transfer.ID.String())
 		}
-		return nil, fmt.Errorf("recovered preimage did not match payment hash: %w", db.ErrNoRollback)
+		return nil, fmt.Errorf("recovered preimage did not match payment hash: %x and transfer id: %s: %w", req.PaymentHash, transfer.ID.String(), db.ErrNoRollback)
 	}
 
 	err = preimageRequest.Update().SetStatus(st.PreimageRequestStatusPreimageShared).Exec(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("unable to update preimage request status: %w", err)
+		return nil, fmt.Errorf("unable to update preimage request status for payment hash: %x and transfer id: %s: %w", req.PaymentHash, transfer.ID.String(), err)
 	}
 
 	return &pb.InitiatePreimageSwapResponse{Preimage: secretBytes, Transfer: transferProto}, nil

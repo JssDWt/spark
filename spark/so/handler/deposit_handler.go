@@ -7,6 +7,9 @@ import (
 	"fmt"
 	"strings"
 
+	"entgo.io/ent/dialect/sql"
+	"github.com/lightsparkdev/spark/common/keys"
+
 	"github.com/btcsuite/btcd/wire"
 	"github.com/google/uuid"
 	"github.com/lightsparkdev/spark/common"
@@ -19,11 +22,14 @@ import (
 	"github.com/lightsparkdev/spark/so/ent/blockheight"
 	"github.com/lightsparkdev/spark/so/ent/depositaddress"
 	st "github.com/lightsparkdev/spark/so/ent/schema/schematype"
+	"github.com/lightsparkdev/spark/so/ent/tree"
+	"github.com/lightsparkdev/spark/so/ent/treenode"
 	"github.com/lightsparkdev/spark/so/ent/utxo"
 	"github.com/lightsparkdev/spark/so/ent/utxoswap"
 	"github.com/lightsparkdev/spark/so/errors"
 	"github.com/lightsparkdev/spark/so/helper"
 	"github.com/lightsparkdev/spark/so/objects"
+	"github.com/lightsparkdev/spark/so/utils"
 	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/protobuf/proto"
 )
@@ -43,6 +49,7 @@ func NewDepositHandler(config *so.Config) *DepositHandler {
 }
 
 // GenerateDepositAddress generates a deposit address for the given public key.
+// The address string is generated using provided network field in the request.
 func (o *DepositHandler) GenerateDepositAddress(ctx context.Context, config *so.Config, req *pb.GenerateDepositAddressRequest) (*pb.GenerateDepositAddressResponse, error) {
 	ctx, span := tracer.Start(ctx, "DepositHandler.GenerateDepositAddress")
 	defer span.End()
@@ -59,21 +66,24 @@ func (o *DepositHandler) GenerateDepositAddress(ctx context.Context, config *so.
 		return nil, err
 	}
 
-	// TODO(LPT-385): remove when we have a way to support multiple static deposit addresses per identity.
+	// TODO(LIG-8000): remove when we have a way to support multiple static deposit addresses per (identity, network).
 	if req.IsStatic != nil && *req.IsStatic {
 		db, err := ent.GetDbFromContext(ctx)
 		if err != nil {
 			return nil, fmt.Errorf("failed to get or create current tx for request: %w", err)
 		}
-		depositAddress, err := db.DepositAddress.Query().
+		depositAddresses, err := db.DepositAddress.Query().
 			Where(depositaddress.OwnerIdentityPubkey(req.IdentityPublicKey)).
 			Where(depositaddress.IsStatic(true)).
-			Only(ctx)
-		if err != nil && !ent.IsNotFound(err) {
+			All(ctx)
+		if err != nil {
 			return nil, err
 		}
-		if depositAddress != nil {
-			return nil, fmt.Errorf("static deposit address already exists: %s", depositAddress.Address)
+		// Find if there is already a static deposit address for this identity and network.
+		for _, depositAddress := range depositAddresses {
+			if utils.IsBitcoinAddressForNetwork(depositAddress.Address, network) {
+				return nil, fmt.Errorf("static deposit address already exists: %s", depositAddress.Address)
+			}
 		}
 	}
 
@@ -105,9 +115,13 @@ func (o *DepositHandler) GenerateDepositAddress(ctx context.Context, config *so.
 		return nil, err
 	}
 
-	combinedPublicKey, err := common.AddPublicKeys(keyshare.PublicKey, req.SigningPublicKey)
+	combinedPublicKeyBytes, err := common.AddPublicKeys(keyshare.PublicKey, req.SigningPublicKey)
 	if err != nil {
 		return nil, fmt.Errorf("failed to add public keys for request %s: %w", logging.FormatProto("generate_deposit_address_request", req), err)
+	}
+	combinedPublicKey, err := keys.ParsePublicKey(combinedPublicKeyBytes)
+	if err != nil {
+		return nil, err
 	}
 	depositAddress, err := common.P2TRAddressFromPublicKey(combinedPublicKey, network)
 	if err != nil {
@@ -123,7 +137,7 @@ func (o *DepositHandler) GenerateDepositAddress(ctx context.Context, config *so.
 		SetSigningKeyshareID(keyshare.ID).
 		SetOwnerIdentityPubkey(req.IdentityPublicKey).
 		SetOwnerSigningPubkey(req.SigningPublicKey).
-		SetAddress(*depositAddress)
+		SetAddress(depositAddress)
 	// Confirmation height is not set since nothing has been confirmed yet.
 
 	if req.IsStatic != nil && *req.IsStatic {
@@ -153,7 +167,7 @@ func (o *DepositHandler) GenerateDepositAddress(ctx context.Context, config *so.
 		client := pbinternal.NewSparkInternalServiceClient(conn)
 		response, err := client.MarkKeyshareForDepositAddress(ctx, &pbinternal.MarkKeyshareForDepositAddressRequest{
 			KeyshareId:             keyshare.ID.String(),
-			Address:                *depositAddress,
+			Address:                depositAddress,
 			OwnerIdentityPublicKey: req.IdentityPublicKey,
 			OwnerSigningPublicKey:  req.SigningPublicKey,
 			IsStatic:               req.IsStatic,
@@ -172,14 +186,14 @@ func (o *DepositHandler) GenerateDepositAddress(ctx context.Context, config *so.
 		return nil, fmt.Errorf("failed to generate proof of possession signatures for request %s: %w", logging.FormatProto("generate_deposit_address_request", req), err)
 	}
 
-	msg := common.ProofOfPossessionMessageHashForDepositAddress(req.IdentityPublicKey, keyshare.PublicKey, []byte(*depositAddress))
+	msg := common.ProofOfPossessionMessageHashForDepositAddress(req.IdentityPublicKey, keyshare.PublicKey, []byte(depositAddress))
 	proofOfPossessionSignature, err := helper.GenerateProofOfPossessionSignatures(ctx, config, [][]byte{msg}, []*ent.SigningKeyshare{keyshare})
 	if err != nil {
 		return nil, err
 	}
 	return &pb.GenerateDepositAddressResponse{
 		DepositAddress: &pb.Address{
-			Address:      *depositAddress,
+			Address:      depositAddress,
 			VerifyingKey: verifyingKeyBytes,
 			DepositAddressProof: &pb.DepositAddressProof{
 				AddressSignatures:          response,
@@ -278,12 +292,16 @@ func (o *DepositHandler) StartTreeCreation(ctx context.Context, config *so.Confi
 	if err != nil {
 		return nil, err
 	}
-	verifyingKeyBytes, err := common.AddPublicKeys(signingKeyShare.PublicKey, depositAddress.OwnerSigningPubkey)
+	signingKeySharePublicKey, err := keys.ParsePublicKey(signingKeyShare.PublicKey)
 	if err != nil {
 		return nil, err
 	}
+	depositOwnerSigningPublicKey, err := keys.ParsePublicKey(depositAddress.OwnerSigningPubkey)
+	if err != nil {
+		return nil, err
+	}
+	verifyingKey := signingKeySharePublicKey.Add(depositOwnerSigningPublicKey)
 
-	signingJobs := make([]*helper.SigningJob, 0)
 	userCpfpRootTxNonceCommitment, err := objects.NewSigningCommitment(req.RootTxSigningJob.SigningNonceCommitment.Binding, req.RootTxSigningJob.SigningNonceCommitment.Hiding)
 	if err != nil {
 		return nil, err
@@ -298,22 +316,22 @@ func (o *DepositHandler) StartTreeCreation(ctx context.Context, config *so.Confi
 	if err != nil {
 		return nil, err
 	}
-
-	signingJobs = append(signingJobs, &helper.SigningJob{
-		JobID:             uuid.New().String(),
-		SigningKeyshareID: signingKeyShare.ID,
-		Message:           cpfpRootTxSigHash,
-		VerifyingKey:      verifyingKeyBytes,
-		UserCommitment:    userCpfpRootTxNonceCommitment,
-	},
-		&helper.SigningJob{
+	signingJobs := []*helper.SigningJob{
+		{
+			JobID:             uuid.New().String(),
+			SigningKeyshareID: signingKeyShare.ID,
+			Message:           cpfpRootTxSigHash,
+			VerifyingKey:      &verifyingKey,
+			UserCommitment:    userCpfpRootTxNonceCommitment,
+		},
+		{
 			JobID:             uuid.New().String(),
 			SigningKeyshareID: signingKeyShare.ID,
 			Message:           cpfpRefundTxSigHash,
-			VerifyingKey:      verifyingKeyBytes,
+			VerifyingKey:      &verifyingKey,
 			UserCommitment:    userCpfpRefundTxNonceCommitment,
 		},
-	)
+	}
 
 	directRootTxSigningJob := req.GetDirectRootTxSigningJob()
 	directRefundTxSigningJob := req.GetDirectRefundTxSigningJob()
@@ -375,21 +393,21 @@ func (o *DepositHandler) StartTreeCreation(ctx context.Context, config *so.Confi
 				JobID:             uuid.New().String(),
 				SigningKeyshareID: signingKeyShare.ID,
 				Message:           directRootTxSigHash,
-				VerifyingKey:      verifyingKeyBytes,
+				VerifyingKey:      &verifyingKey,
 				UserCommitment:    userDirectRootTxNonceCommitment,
 			},
 			&helper.SigningJob{
 				JobID:             uuid.New().String(),
 				SigningKeyshareID: signingKeyShare.ID,
 				Message:           directRefundTxSigHash,
-				VerifyingKey:      verifyingKeyBytes,
+				VerifyingKey:      &verifyingKey,
 				UserCommitment:    userDirectRefundTxNonceCommitment,
 			},
 			&helper.SigningJob{
 				JobID:             uuid.New().String(),
 				SigningKeyshareID: signingKeyShare.ID,
 				Message:           directFromCpfpRefundTxSigHash,
-				VerifyingKey:      verifyingKeyBytes,
+				VerifyingKey:      &verifyingKey,
 				UserCommitment:    userDirectFromCpfpRefundTxNonceCommitment,
 			},
 		)
@@ -448,15 +466,15 @@ func (o *DepositHandler) StartTreeCreation(ctx context.Context, config *so.Confi
 	if err != nil {
 		return nil, err
 	}
-	directTx := []byte{}
+	var directTx []byte
 	if req.DirectRootTxSigningJob != nil {
 		directTx = req.DirectRootTxSigningJob.RawTx
 	}
-	directRefundTx := []byte{}
+	var directRefundTx []byte
 	if req.DirectRefundTxSigningJob != nil {
 		directRefundTx = req.DirectRefundTxSigningJob.RawTx
 	}
-	directFromCpfpRefundTx := []byte{}
+	var directFromCpfpRefundTx []byte
 	if req.DirectFromCpfpRefundTxSigningJob != nil {
 		directFromCpfpRefundTx = req.DirectFromCpfpRefundTxSigningJob.RawTx
 	}
@@ -467,7 +485,7 @@ func (o *DepositHandler) StartTreeCreation(ctx context.Context, config *so.Confi
 		SetOwnerIdentityPubkey(depositAddress.OwnerIdentityPubkey).
 		SetOwnerSigningPubkey(depositAddress.OwnerSigningPubkey).
 		SetValue(uint64(onChainOutput.Value)).
-		SetVerifyingPubkey(verifyingKeyBytes).
+		SetVerifyingPubkey(verifyingKey.Serialize()).
 		SetSigningKeyshare(signingKeyShare).
 		SetRawTx(req.RootTxSigningJob.RawTx).
 		SetRawRefundTx(req.RefundTxSigningJob.RawTx).
@@ -490,7 +508,7 @@ func (o *DepositHandler) StartTreeCreation(ctx context.Context, config *so.Confi
 			NodeId:                              root.ID.String(),
 			NodeTxSigningResult:                 cpfpNodeTxSigningResult,
 			RefundTxSigningResult:               cpfpRefundTxSigningResult,
-			VerifyingKey:                        verifyingKeyBytes,
+			VerifyingKey:                        verifyingKey.Serialize(),
 			DirectNodeTxSigningResult:           directNodeTxSigningResult,
 			DirectRefundTxSigningResult:         directRefundTxSigningResult,
 			DirectFromCpfpRefundTxSigningResult: directFromCpfpRefundTxSigningResult,
@@ -588,12 +606,16 @@ func (o *DepositHandler) StartDepositTreeCreation(ctx context.Context, config *s
 	if err != nil {
 		return nil, err
 	}
-	verifyingKeyBytes, err := common.AddPublicKeys(signingKeyShare.PublicKey, depositAddress.OwnerSigningPubkey)
+	signingKeySharePublicKey, err := keys.ParsePublicKey(signingKeyShare.PublicKey)
 	if err != nil {
 		return nil, err
 	}
+	depositOwnerSigningPublicKey, err := keys.ParsePublicKey(depositAddress.OwnerSigningPubkey)
+	if err != nil {
+		return nil, err
+	}
+	verifyingKey := signingKeySharePublicKey.Add(depositOwnerSigningPublicKey)
 
-	signingJobs := make([]*helper.SigningJob, 0)
 	userCpfpRootTxNonceCommitment, err := objects.NewSigningCommitment(req.RootTxSigningJob.SigningNonceCommitment.Binding, req.RootTxSigningJob.SigningNonceCommitment.Hiding)
 	if err != nil {
 		return nil, err
@@ -603,23 +625,22 @@ func (o *DepositHandler) StartDepositTreeCreation(ctx context.Context, config *s
 		return nil, err
 	}
 
-	signingJobs = append(
-		signingJobs,
-		&helper.SigningJob{
+	signingJobs := []*helper.SigningJob{
+		{
 			JobID:             uuid.New().String(),
 			SigningKeyshareID: signingKeyShare.ID,
 			Message:           cpfpRootTxSigHash,
-			VerifyingKey:      verifyingKeyBytes,
+			VerifyingKey:      &verifyingKey,
 			UserCommitment:    userCpfpRootTxNonceCommitment,
 		},
-		&helper.SigningJob{
+		{
 			JobID:             uuid.New().String(),
 			SigningKeyshareID: signingKeyShare.ID,
 			Message:           cpfpRefundTxSigHash,
-			VerifyingKey:      verifyingKeyBytes,
+			VerifyingKey:      &verifyingKey,
 			UserCommitment:    userCpfpRefundTxNonceCommitment,
 		},
-	)
+	}
 
 	// New flow
 	directRootTxSigningJob := req.GetDirectRootTxSigningJob()
@@ -690,21 +711,21 @@ func (o *DepositHandler) StartDepositTreeCreation(ctx context.Context, config *s
 				JobID:             uuid.New().String(),
 				SigningKeyshareID: signingKeyShare.ID,
 				Message:           directRootTxSigHash,
-				VerifyingKey:      verifyingKeyBytes,
+				VerifyingKey:      &verifyingKey,
 				UserCommitment:    userDirectRootTxNonceCommitment,
 			},
 			&helper.SigningJob{
 				JobID:             uuid.New().String(),
 				SigningKeyshareID: signingKeyShare.ID,
 				Message:           directRefundTxSigHash,
-				VerifyingKey:      verifyingKeyBytes,
+				VerifyingKey:      &verifyingKey,
 				UserCommitment:    userDirectRefundTxNonceCommitment,
 			},
 			&helper.SigningJob{
 				JobID:             uuid.New().String(),
 				SigningKeyshareID: signingKeyShare.ID,
 				Message:           directFromCpfpRefundTxSigHash,
-				VerifyingKey:      verifyingKeyBytes,
+				VerifyingKey:      &verifyingKey,
 				UserCommitment:    userDirectFromCpfpRefundTxNonceCommitment,
 			},
 		)
@@ -745,57 +766,111 @@ func (o *DepositHandler) StartDepositTreeCreation(ctx context.Context, config *s
 		return nil, err
 	}
 	txid := onChainTx.TxHash()
-	treeMutator := db.Tree.
-		Create().
-		SetOwnerIdentityPubkey(depositAddress.OwnerIdentityPubkey).
-		SetNetwork(schemaNetwork).
-		SetBaseTxid(txid[:]).
-		SetVout(int16(req.OnChainUtxo.Vout))
 
-	if txConfirmed {
-		treeMutator.SetStatus(st.TreeStatusAvailable)
+	// Check if a tree already exists for this deposit
+	existingTree, err := db.Tree.Query().
+		Where(tree.BaseTxid(txid[:])).
+		Where(tree.Vout(int16(req.OnChainUtxo.Vout))).
+		First(ctx)
+
+	if err != nil && !ent.IsNotFound(err) {
+		return nil, fmt.Errorf("failed to query for existing tree: %w", err)
+	}
+
+	logger := logging.GetLoggerFromContext(ctx)
+	logger.Info("existingTree", "existingTree", existingTree)
+	var tree *ent.Tree
+	if existingTree != nil {
+		// Tree already exists, use the existing one
+		tree = existingTree
+		logger.Info("Tree already exists", "treeId", existingTree.ID, "depositAddress", depositAddress.ID, "txid", txid)
 	} else {
-		treeMutator.SetStatus(st.TreeStatusPending)
+		// Create new tree
+		treeMutator := db.Tree.
+			Create().
+			SetOwnerIdentityPubkey(depositAddress.OwnerIdentityPubkey).
+			SetNetwork(schemaNetwork).
+			SetBaseTxid(txid[:]).
+			SetVout(int16(req.OnChainUtxo.Vout))
+
+		if txConfirmed {
+			treeMutator.SetStatus(st.TreeStatusAvailable)
+		} else {
+			treeMutator.SetStatus(st.TreeStatusPending)
+		}
+		tree, err = treeMutator.Save(ctx)
+		if err != nil {
+			return nil, err
+		}
 	}
-	tree, err := treeMutator.Save(ctx)
-	if err != nil {
-		return nil, err
-	}
-	directTx := []byte{}
+	var directTx []byte
 	if req.DirectRootTxSigningJob != nil {
 		directTx = req.DirectRootTxSigningJob.RawTx
 	}
-	directRefundTx := []byte{}
+	var directRefundTx []byte
 	if req.DirectRefundTxSigningJob != nil {
 		directRefundTx = req.DirectRefundTxSigningJob.RawTx
 	}
-	directFromCpfpRefundTx := []byte{}
+	var directFromCpfpRefundTx []byte
 	if req.DirectFromCpfpRefundTxSigningJob != nil {
 		directFromCpfpRefundTx = req.DirectFromCpfpRefundTxSigningJob.RawTx
 	}
-	treeNodeMutator := db.TreeNode.
-		Create().
-		SetTree(tree).
-		SetStatus(st.TreeNodeStatusCreating).
-		SetOwnerIdentityPubkey(depositAddress.OwnerIdentityPubkey).
-		SetOwnerSigningPubkey(depositAddress.OwnerSigningPubkey).
-		SetValue(uint64(onChainOutput.Value)).
-		SetVerifyingPubkey(verifyingKeyBytes).
-		SetSigningKeyshare(signingKeyShare).
-		SetRawTx(req.RootTxSigningJob.RawTx).
-		SetRawRefundTx(req.RefundTxSigningJob.RawTx).
-		SetDirectTx(directTx).
-		SetDirectRefundTx(directRefundTx).
-		SetDirectFromCpfpRefundTx(directFromCpfpRefundTx).
-		SetVout(int16(req.OnChainUtxo.Vout))
+	// Check if a tree node already exists for this deposit
+	existingRoot, err := db.TreeNode.Query().
+		Where(treenode.OwnerIdentityPubkey(depositAddress.OwnerIdentityPubkey)).
+		Where(treenode.OwnerSigningPubkey(depositAddress.OwnerSigningPubkey)).
+		Where(treenode.Value(uint64(onChainOutput.Value))).
+		Where(treenode.Vout(int16(req.OnChainUtxo.Vout))).
+		ForUpdate().
+		Only(ctx)
 
-	if depositAddress.NodeID != uuid.Nil {
-		treeNodeMutator.SetID(depositAddress.NodeID)
+	if err != nil && !ent.IsNotFound(err) {
+		return nil, fmt.Errorf("failed to query for existing tree node: %w", err)
 	}
 
-	root, err := treeNodeMutator.Save(ctx)
-	if err != nil {
-		return nil, err
+	var root *ent.TreeNode
+	if existingRoot != nil {
+		if existingRoot.Status != st.TreeNodeStatusCreating {
+			return nil, errors.AlreadyExistsErrorf("Expected tree node %s to be in creating status; got %s.", existingRoot.ID, existingRoot.Status)
+		}
+		logger.Info("Tree node already exists, updating with new transaction data", "treeNodeId", existingRoot.ID, "depositAddress", depositAddress.ID, "txid", txid)
+		// Tree node already exists, update it with new transaction data
+		root, err = existingRoot.Update().
+			SetRawTx(req.RootTxSigningJob.RawTx).
+			SetRawRefundTx(req.RefundTxSigningJob.RawTx).
+			SetDirectTx(directTx).
+			SetDirectRefundTx(directRefundTx).
+			SetDirectFromCpfpRefundTx(directFromCpfpRefundTx).
+			Save(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("failed to update existing tree node: %w", err)
+		}
+	} else {
+		// Create new tree node
+		treeNodeMutator := db.TreeNode.
+			Create().
+			SetTree(tree).
+			SetStatus(st.TreeNodeStatusCreating).
+			SetOwnerIdentityPubkey(depositAddress.OwnerIdentityPubkey).
+			SetOwnerSigningPubkey(depositAddress.OwnerSigningPubkey).
+			SetValue(uint64(onChainOutput.Value)).
+			SetVerifyingPubkey(verifyingKey.Serialize()).
+			SetSigningKeyshare(signingKeyShare).
+			SetRawTx(req.RootTxSigningJob.RawTx).
+			SetRawRefundTx(req.RefundTxSigningJob.RawTx).
+			SetDirectTx(directTx).
+			SetDirectRefundTx(directRefundTx).
+			SetDirectFromCpfpRefundTx(directFromCpfpRefundTx).
+			SetVout(int16(req.OnChainUtxo.Vout))
+
+		if depositAddress.NodeID != uuid.Nil {
+			treeNodeMutator.SetID(depositAddress.NodeID)
+		}
+
+		root, err = treeNodeMutator.Save(ctx)
+		if err != nil {
+			return nil, err
+		}
 	}
 	tree, err = tree.Update().SetRoot(root).Save(ctx)
 	if err != nil {
@@ -808,7 +883,7 @@ func (o *DepositHandler) StartDepositTreeCreation(ctx context.Context, config *s
 			NodeId:                              root.ID.String(),
 			NodeTxSigningResult:                 cpfpNodeTxSigningResult,
 			RefundTxSigningResult:               cpfpRefundTxSigningResult,
-			VerifyingKey:                        verifyingKeyBytes,
+			VerifyingKey:                        verifyingKey.Serialize(),
 			DirectNodeTxSigningResult:           directNodeTxSigningResult,
 			DirectRefundTxSigningResult:         directRefundTxSigningResult,
 			DirectFromCpfpRefundTxSigningResult: directFromCpfpRefundTxSigningResult,
@@ -1006,9 +1081,9 @@ func (o *DepositHandler) InitiateUtxoSwap(ctx context.Context, config *so.Config
 			ctx,
 			req.Transfer,
 			st.TransferTypeUtxoSwap,
-			nil,
-			nil,
-			nil,
+			keys.Public{},
+			keys.Public{},
+			keys.Public{},
 			false,
 		)
 		if err != nil {
@@ -1122,41 +1197,42 @@ func VerifiedTargetUtxo(ctx context.Context, config *so.Config, db *ent.Tx, sche
 //   - *pb.SigningResult: Signing result containing a partial FROST signature that can
 //     be aggregated with other signatures.
 //   - error if the operation fails.
-func getSpendTxSigningResult(ctx context.Context, config *so.Config, depositAddress *ent.DepositAddress, targetUtxo *ent.Utxo, spendTxRaw []byte, userSpendTxNonceCommitment *objects.SigningCommitment) ([]byte, *pb.SigningResult, error) {
+func getSpendTxSigningResult(ctx context.Context, config *so.Config, depositAddress *ent.DepositAddress, targetUtxo *ent.Utxo, spendTxRaw []byte, userSpendTxNonceCommitment *objects.SigningCommitment) (keys.Public, *pb.SigningResult, error) {
 	signingKeyShare, err := depositAddress.QuerySigningKeyshare().Only(ctx)
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to get signing keyshare: %w", err)
+		return keys.Public{}, nil, fmt.Errorf("failed to get signing keyshare: %w", err)
 	}
-	verifyingKeyBytes, err := common.AddPublicKeys(signingKeyShare.PublicKey, depositAddress.OwnerSigningPubkey)
+	signingKeySharePublicKey, err := keys.ParsePublicKey(signingKeyShare.PublicKey)
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to add public keys: %w", err)
+		return keys.Public{}, nil, err
 	}
+	depositOwnerSigningPublicKey, err := keys.ParsePublicKey(depositAddress.OwnerSigningPubkey)
+	if err != nil {
+		return keys.Public{}, nil, err
+	}
+	verifyingKey := signingKeySharePublicKey.Add(depositOwnerSigningPublicKey)
 	spendTxSigHash, _, err := GetTxSigningInfo(ctx, targetUtxo, spendTxRaw)
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to get spend tx sig hash: %w", err)
+		return keys.Public{}, nil, fmt.Errorf("failed to get spend tx sig hash: %w", err)
 	}
 
-	signingJobs := make([]*helper.SigningJob, 0)
-	signingJobs = append(
-		signingJobs,
-		&helper.SigningJob{
-			JobID:             uuid.New().String(),
-			SigningKeyshareID: signingKeyShare.ID,
-			Message:           spendTxSigHash,
-			VerifyingKey:      verifyingKeyBytes,
-			UserCommitment:    userSpendTxNonceCommitment,
-		},
-	)
+	signingJobs := []*helper.SigningJob{{
+		JobID:             uuid.New().String(),
+		SigningKeyshareID: signingKeyShare.ID,
+		Message:           spendTxSigHash,
+		VerifyingKey:      &verifyingKey,
+		UserCommitment:    userSpendTxNonceCommitment,
+	}}
 	signingResults, err := helper.SignFrost(ctx, config, signingJobs)
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to sign spend tx: %w", err)
+		return keys.Public{}, nil, fmt.Errorf("failed to sign spend tx: %w", err)
 	}
 
 	spendTxSigningResult, err := signingResults[0].MarshalProto()
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to marshal spend tx signing result: %w", err)
+		return keys.Public{}, nil, fmt.Errorf("failed to marshal spend tx signing result: %w", err)
 	}
-	return verifyingKeyBytes, spendTxSigningResult, nil
+	return verifyingKey, spendTxSigningResult, nil
 }
 
 func GetTxSigningInfo(ctx context.Context, targetUtxo *ent.Utxo, spendTxRaw []byte) ([]byte, uint64, error) {
@@ -1209,7 +1285,7 @@ func GetSpendTxSigningResult(ctx context.Context, config *so.Config, utxo *pb.UT
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to create signing commitment: %w", err)
 	}
-	verifyingKeyBytes, spendTxSigningResult, err := getSpendTxSigningResult(ctx, config, depositAddress, targetUtxo, spendTxSigningJob.RawTx, userRootTxNonceCommitment)
+	verifyingKey, spendTxSigningResult, err := getSpendTxSigningResult(ctx, config, depositAddress, targetUtxo, spendTxSigningJob.RawTx, userRootTxNonceCommitment)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to get spend tx signing result: %w", err)
 	}
@@ -1218,7 +1294,86 @@ func GetSpendTxSigningResult(ctx context.Context, config *so.Config, utxo *pb.UT
 	return spendTxSigningResult, &pb.DepositAddressQueryResult{
 		DepositAddress:       depositAddress.Address,
 		UserSigningPublicKey: depositAddress.OwnerSigningPubkey,
-		VerifyingPublicKey:   verifyingKeyBytes,
+		VerifyingPublicKey:   verifyingKey.Serialize(),
 		LeafId:               &nodeIDStr,
+	}, nil
+}
+
+func (o *DepositHandler) GetUtxosForAddress(ctx context.Context, req *pb.GetUtxosForAddressRequest) (*pb.GetUtxosForAddressResponse, error) {
+	db, err := ent.GetDbFromContext(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get or create current tx for request: %w", err)
+	}
+	depositAddress, err := db.DepositAddress.Query().Where(depositaddress.Address(req.Address)).Only(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get deposit address: %w", err)
+	}
+
+	network, err := common.DetermineNetwork(req.Network)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get schema network: %w", err)
+	}
+
+	schemaNetwork, err := common.SchemaNetworkFromProtoNetwork(req.Network)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get schema network: %w", err)
+	}
+
+	if !utils.IsBitcoinAddressForNetwork(req.Address, *network) {
+		return nil, fmt.Errorf("deposit address is not aligned with the requested network")
+	}
+
+	currentBlockHeight, err := db.BlockHeight.Query().Where(blockheight.NetworkEQ(schemaNetwork)).Only(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get current block height: %w", err)
+	}
+
+	threshold := DefaultDepositConfirmationThreshold
+	if bitcoinConfig, ok := o.config.BitcoindConfigs[strings.ToLower(string(schemaNetwork))]; ok {
+		threshold = bitcoinConfig.DepositConfirmationThreshold
+	}
+
+	var utxosResult []*pb.UTXO
+	if depositAddress.IsStatic {
+		if req.Limit > 100 || req.Limit <= 0 {
+			req.Limit = 100
+		}
+		utxos, err := depositAddress.QueryUtxo().
+			Where(utxo.BlockHeightLTE(currentBlockHeight.Height - int64(threshold))).
+			Offset(int(req.Offset)).
+			Limit(int(req.Limit)).
+			Order(utxo.ByBlockHeight(sql.OrderDesc())).
+			All(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get utxo: %w", err)
+		}
+		if len(utxos) == 0 {
+			return &pb.GetUtxosForAddressResponse{
+				Utxos: []*pb.UTXO{},
+			}, nil
+		}
+
+		for _, utxo := range utxos {
+			utxosResult = append(utxosResult, &pb.UTXO{
+				Txid:    utxo.Txid,
+				Vout:    utxo.Vout,
+				Network: req.Network,
+			})
+		}
+	} else if len(depositAddress.ConfirmationTxid) > 0 {
+		txid, err := hex.DecodeString(depositAddress.ConfirmationTxid)
+		if err != nil {
+			return nil, fmt.Errorf("failed to decode confirmation txid: %w", err)
+		}
+
+		if depositAddress.ConfirmationHeight <= currentBlockHeight.Height-int64(threshold) {
+			utxosResult = append(utxosResult, &pb.UTXO{
+				Txid: txid,
+			})
+		}
+	}
+
+	return &pb.GetUtxosForAddressResponse{
+		Utxos: utxosResult,
 	}, nil
 }

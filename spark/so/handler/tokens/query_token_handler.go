@@ -166,8 +166,12 @@ func (h *QueryTokenHandler) queryTokenTransactionsInternal(ctx context.Context, 
 	// Apply sorting, limit and offset
 	query := baseQuery.Order(ent.Desc(tokentransaction.FieldUpdateTime))
 
-	if req.Limit > 100 || req.Limit == 0 {
+	if req.Limit == 0 {
 		req.Limit = 100
+	}
+
+	if req.Limit > 1000 {
+		req.Limit = 1000
 	}
 	query = query.Limit(int(req.Limit))
 
@@ -280,17 +284,28 @@ func (h *QueryTokenHandler) queryTokenOutputsInternal(
 	allSelection := helper.OperatorSelection{Option: helper.OperatorSelectionOptionAll}
 	responses, err := helper.ExecuteTaskWithAllOperators(ctx, h.config, &allSelection,
 		func(ctx context.Context, operator *so.SigningOperator) (map[string]*sparkpb.OutputWithPreviousTransactionData, error) {
-			conn, err := operator.NewGRPCConnection()
-			if err != nil {
-				return nil, fmt.Errorf("failed to connect to operator %s: %w", operator.Identifier, err)
-			}
-			defer conn.Close()
+			var availableOutputs *sparkpb.QueryTokenOutputsResponse
+			var err error
 
-			client := pbinternal.NewSparkInternalServiceClient(conn)
-			availableOutputs, err := client.QueryTokenOutputsInternal(ctx, sparkReq)
-			if err != nil {
-				return nil, fmt.Errorf("failed to query token outputs from operator %s: %w", operator.Identifier, err)
+			if operator.Identifier == h.config.Identifier {
+				availableOutputs, err = h.QueryTokenOutputsSpark(ctx, sparkReq)
+				if err != nil {
+					return nil, fmt.Errorf("failed to query token outputs from operator %s: %w", operator.Identifier, err)
+				}
+			} else {
+				conn, err := operator.NewGRPCConnection()
+				if err != nil {
+					return nil, fmt.Errorf("failed to connect to operator %s: %w", operator.Identifier, err)
+				}
+				defer conn.Close()
+
+				client := pbinternal.NewSparkInternalServiceClient(conn)
+				availableOutputs, err = client.QueryTokenOutputsInternal(ctx, sparkReq)
+				if err != nil {
+					return nil, fmt.Errorf("failed to query token outputs from operator %s: %w", operator.Identifier, err)
+				}
 			}
+
 			spendableOutputMap := make(map[string]*sparkpb.OutputWithPreviousTransactionData)
 			for _, output := range availableOutputs.OutputsWithPreviousTransactionData {
 				spendableOutputMap[*output.Output.Id] = output

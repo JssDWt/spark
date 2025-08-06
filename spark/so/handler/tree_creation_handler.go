@@ -3,8 +3,11 @@ package handler
 import (
 	"bytes"
 	"context"
+	"encoding/hex"
 	"errors"
 	"fmt"
+
+	"github.com/lightsparkdev/spark/common/keys"
 
 	"github.com/btcsuite/btcd/wire"
 	"github.com/google/uuid"
@@ -257,7 +260,11 @@ func (h *TreeCreationHandler) createAddressNodeFromPrepareTreeAddressNode(
 	userIdentityPublicKey []byte,
 	save bool,
 ) (addressNode *pb.AddressNode, err error) {
-	combinedPublicKey, err := common.AddPublicKeys(keysharesMap[node.SigningKeyshareId].PublicKey, node.UserPublicKey)
+	combinedPublicKeyBytes, err := common.AddPublicKeys(keysharesMap[node.SigningKeyshareId].PublicKey, node.UserPublicKey)
+	if err != nil {
+		return nil, err
+	}
+	combinedPublicKey, err := keys.ParsePublicKey(combinedPublicKeyBytes)
 	if err != nil {
 		return nil, err
 	}
@@ -276,7 +283,7 @@ func (h *TreeCreationHandler) createAddressNodeFromPrepareTreeAddressNode(
 			SetSigningKeyshareID(keysharesMap[node.SigningKeyshareId].ID).
 			SetOwnerIdentityPubkey(userIdentityPublicKey).
 			SetOwnerSigningPubkey(node.UserPublicKey).
-			SetAddress(*depositAddress).
+			SetAddress(depositAddress).
 			Save(ctx)
 		if err != nil {
 			return nil, err
@@ -285,8 +292,8 @@ func (h *TreeCreationHandler) createAddressNodeFromPrepareTreeAddressNode(
 	if len(node.Children) == 0 {
 		return &pb.AddressNode{
 			Address: &pb.Address{
-				Address:      *depositAddress,
-				VerifyingKey: combinedPublicKey,
+				Address:      depositAddress,
+				VerifyingKey: combinedPublicKey.Serialize(),
 			},
 		}, nil
 	}
@@ -299,8 +306,8 @@ func (h *TreeCreationHandler) createAddressNodeFromPrepareTreeAddressNode(
 	}
 	return &pb.AddressNode{
 		Address: &pb.Address{
-			Address:      *depositAddress,
-			VerifyingKey: combinedPublicKey,
+			Address:      depositAddress,
+			VerifyingKey: combinedPublicKey.Serialize(),
 		},
 		Children: children,
 	}, nil
@@ -478,7 +485,13 @@ func (h *TreeCreationHandler) prepareSigningJobs(ctx context.Context, req *pb.Cr
 		return nil, nil, err
 	}
 	userPublicKey := depositAddress.OwnerSigningPubkey
+	unchainUtxo := req.GetOnChainUtxo()
 	onchain := depositAddress.ConfirmationHeight != 0
+	if depositAddress.ConfirmationTxid != "" && unchainUtxo != nil {
+		if depositAddress.ConfirmationTxid != hex.EncodeToString(unchainUtxo.Txid) {
+			return nil, nil, errors.New("confirmation txid does not match utxo txid")
+		}
+	}
 
 	queue := []*element{}
 	queue = append(queue, &element{
@@ -501,7 +514,7 @@ func (h *TreeCreationHandler) prepareSigningJobs(ctx context.Context, req *pb.Cr
 			return nil, nil, errors.New("refund tx should be on leaf node")
 		}
 
-		cpfpSigningJob, cpfpTx, err := helper.NewSigningJob(currentElement.keyshare, currentElement.node.NodeTxSigningJob, currentElement.output, nil)
+		cpfpSigningJob, cpfpTx, err := helper.NewSigningJob(currentElement.keyshare, currentElement.node.NodeTxSigningJob, currentElement.output)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -510,7 +523,7 @@ func (h *TreeCreationHandler) prepareSigningJobs(ctx context.Context, req *pb.Cr
 		var directSigningJob *helper.SigningJob
 		var directTx *wire.MsgTx
 		if currentElement.node.DirectNodeTxSigningJob != nil {
-			directSigningJob, directTx, err = helper.NewSigningJob(currentElement.keyshare, currentElement.node.DirectNodeTxSigningJob, currentElement.output, nil)
+			directSigningJob, directTx, err = helper.NewSigningJob(currentElement.keyshare, currentElement.node.DirectNodeTxSigningJob, currentElement.output)
 			if err != nil {
 				return nil, nil, err
 			}
@@ -619,7 +632,7 @@ func (h *TreeCreationHandler) prepareSigningJobs(ctx context.Context, req *pb.Cr
 			if len(cpfpTx.TxOut) <= 0 {
 				return nil, nil, fmt.Errorf("vout out of bounds for cpfp node tx, need at least one output")
 			}
-			cpfpRefundSigningJob, _, err := helper.NewSigningJob(currentElement.keyshare, currentElement.node.RefundTxSigningJob, cpfpTx.TxOut[0], nil)
+			cpfpRefundSigningJob, _, err := helper.NewSigningJob(currentElement.keyshare, currentElement.node.RefundTxSigningJob, cpfpTx.TxOut[0])
 			if err != nil {
 				return nil, nil, err
 			}
@@ -628,11 +641,11 @@ func (h *TreeCreationHandler) prepareSigningJobs(ctx context.Context, req *pb.Cr
 				if len(directTx.TxOut) <= 0 {
 					return nil, nil, fmt.Errorf("vout out of bounds for cpfp node tx, need at least one output")
 				}
-				directRefundSigningJob, _, err := helper.NewSigningJob(currentElement.keyshare, currentElement.node.DirectRefundTxSigningJob, directTx.TxOut[0], nil)
+				directRefundSigningJob, _, err := helper.NewSigningJob(currentElement.keyshare, currentElement.node.DirectRefundTxSigningJob, directTx.TxOut[0])
 				if err != nil {
 					return nil, nil, err
 				}
-				directFromCpfpRefundSigningJob, _, err := helper.NewSigningJob(currentElement.keyshare, currentElement.node.DirectFromCpfpRefundTxSigningJob, cpfpTx.TxOut[0], nil)
+				directFromCpfpRefundSigningJob, _, err := helper.NewSigningJob(currentElement.keyshare, currentElement.node.DirectFromCpfpRefundTxSigningJob, cpfpTx.TxOut[0])
 				if err != nil {
 					return nil, nil, err
 				}

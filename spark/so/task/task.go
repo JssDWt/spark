@@ -7,8 +7,12 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/lightsparkdev/spark/common/keys"
+
+	"github.com/lightsparkdev/spark/so/db"
 	"github.com/lightsparkdev/spark/so/handler/tokens"
 	"github.com/lightsparkdev/spark/so/helper"
+	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"entgo.io/ent/dialect/sql"
 	"github.com/go-co-op/gocron/v2"
@@ -17,8 +21,9 @@ import (
 	"github.com/lightsparkdev/spark/common/logging"
 	pbspark "github.com/lightsparkdev/spark/proto/spark"
 	pbinternal "github.com/lightsparkdev/spark/proto/spark_internal"
+	tokenpb "github.com/lightsparkdev/spark/proto/spark_token"
+	tokeninternalpb "github.com/lightsparkdev/spark/proto/spark_token_internal"
 	"github.com/lightsparkdev/spark/so"
-	"github.com/lightsparkdev/spark/so/db"
 	"github.com/lightsparkdev/spark/so/ent"
 	"github.com/lightsparkdev/spark/so/ent/gossip"
 	st "github.com/lightsparkdev/spark/so/ent/schema/schematype"
@@ -30,22 +35,20 @@ import (
 	"github.com/lightsparkdev/spark/so/ent/treenode"
 	"github.com/lightsparkdev/spark/so/ent/utxoswap"
 	"github.com/lightsparkdev/spark/so/handler"
-	"github.com/lightsparkdev/spark/so/lrc20"
-	"go.opentelemetry.io/otel"
-	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/metric"
 )
 
 var (
 	defaultTaskTimeout              = 1 * time.Minute
 	dkgTaskTimeout                  = 3 * time.Minute
 	deleteStaleTreeNodesTaskTimeout = 10 * time.Minute
-
-	errTaskTimeout = fmt.Errorf("task timed out")
 )
 
 // BaseTask contains common fields for all task types.
-type BaseTask struct {
+
+type Task func(context.Context, *so.Config) error
+
+// BaseTaskSpec is a task that is scheduled to run.
+type BaseTaskSpec struct { //nolint:revive
 	// Name is the human-readable name of the task.
 	Name string
 	// Timeout is the maximum time the task is allowed to run before it will be cancelled.
@@ -55,19 +58,19 @@ type BaseTask struct {
 	// If true, the task will not run
 	Disabled bool
 	// Task is the function that is run when the task is scheduled.
-	Task func(context.Context, *so.Config, *lrc20.Client) error
+	Task func(context.Context, *so.Config) error
 }
 
 // ScheduledTask is a task that runs on a schedule.
-type ScheduledTask struct {
-	BaseTask
+type ScheduledTaskSpec struct {
+	BaseTaskSpec
 	// ExecutionInterval is the interval between each run of the task.
 	ExecutionInterval time.Duration
 }
 
 // StartupTask is a task that runs once at startup.
-type StartupTask struct {
-	BaseTask
+type StartupTaskSpec struct {
+	BaseTaskSpec
 	// RetryInterval is the interval between retries for startup tasks. If nil, no retries are performed.
 	// Retries may be necessary if a startup task is dependent on other asynchronous setup, such as internal
 	// GRPCs to other operators that may not be ready immediately upon the startup of this operator.
@@ -75,25 +78,25 @@ type StartupTask struct {
 }
 
 // AllScheduledTasks returns all the tasks that are scheduled to run.
-func AllScheduledTasks() []ScheduledTask {
-	return []ScheduledTask{
+func AllScheduledTasks() []ScheduledTaskSpec {
+	return []ScheduledTaskSpec{
 		{
 			ExecutionInterval: 10 * time.Second,
-			BaseTask: BaseTask{
+			BaseTaskSpec: BaseTaskSpec{
 				Name:         "dkg",
 				Timeout:      &dkgTaskTimeout,
 				RunInTestEnv: true,
-				Task: func(ctx context.Context, config *so.Config, _ *lrc20.Client) error {
+				Task: func(ctx context.Context, config *so.Config) error {
 					return ent.RunDKGIfNeeded(ctx, config)
 				},
 			},
 		},
 		{
 			ExecutionInterval: 1 * time.Minute,
-			BaseTask: BaseTask{
+			BaseTaskSpec: BaseTaskSpec{
 				Name:         "cancel_expired_transfers",
 				RunInTestEnv: true,
-				Task: func(ctx context.Context, config *so.Config, _ *lrc20.Client) error {
+				Task: func(ctx context.Context, config *so.Config) error {
 					logger := logging.GetLoggerFromContext(ctx)
 					h := handler.NewTransferHandler(config)
 
@@ -103,7 +106,13 @@ func AllScheduledTasks() []ScheduledTask {
 					}
 					query := tx.Transfer.Query().Where(
 						transfer.And(
-							transfer.StatusIn(st.TransferStatusSenderInitiated, st.TransferStatusSenderKeyTweakPending),
+							transfer.Or(
+								transfer.StatusEQ(st.TransferStatusSenderInitiated),
+								transfer.And(
+									transfer.StatusEQ(st.TransferStatusSenderKeyTweakPending),
+									transfer.TypeIn(st.TransferTypeCooperativeExit, st.TransferTypePreimageSwap),
+								),
+							),
 							transfer.ExpiryTimeLT(time.Now()),
 							transfer.ExpiryTimeNEQ(time.Unix(0, 0)),
 						),
@@ -127,14 +136,14 @@ func AllScheduledTasks() []ScheduledTask {
 		},
 		{
 			ExecutionInterval: 1 * time.Hour,
-			BaseTask: BaseTask{
+			BaseTaskSpec: BaseTaskSpec{
 				Name:         "delete_stale_pending_trees",
 				Timeout:      &deleteStaleTreeNodesTaskTimeout,
 				RunInTestEnv: false,
 				// TODO(LIG-7896): This task keeps on getting stuck on
 				// very large trees. Disabling for now as we investigate
 				Disabled: true,
-				Task: func(ctx context.Context, _ *so.Config, _ *lrc20.Client) error {
+				Task: func(ctx context.Context, _ *so.Config) error {
 					logger := logging.GetLoggerFromContext(ctx)
 					tx, err := ent.GetDbFromContext(ctx)
 					if err != nil {
@@ -197,9 +206,9 @@ func AllScheduledTasks() []ScheduledTask {
 		},
 		{
 			ExecutionInterval: 5 * time.Minute,
-			BaseTask: BaseTask{
+			BaseTaskSpec: BaseTaskSpec{
 				Name: "resume_send_transfer",
-				Task: func(ctx context.Context, config *so.Config, _ *lrc20.Client) error {
+				Task: func(ctx context.Context, config *so.Config) error {
 					logger := logging.GetLoggerFromContext(ctx)
 					h := handler.NewTransferHandler(config)
 
@@ -231,14 +240,14 @@ func AllScheduledTasks() []ScheduledTask {
 		},
 		{
 			ExecutionInterval: 1 * time.Hour,
-			BaseTask: BaseTask{
+			BaseTaskSpec: BaseTaskSpec{
 				Name:         "cancel_or_finalize_expired_token_transactions",
 				RunInTestEnv: true,
-				Task: func(ctx context.Context, config *so.Config, lrc20Client *lrc20.Client) error {
+				Task: func(ctx context.Context, config *so.Config) error {
 					logger := logging.GetLoggerFromContext(ctx)
 					currentTime := time.Now()
 
-					h := tokens.NewInternalFinalizeTokenHandler(config, lrc20Client)
+					h := tokens.NewInternalFinalizeTokenHandler(config)
 					logger.Info("Checking for expired token transactions",
 						"current_time", currentTime.Format(time.RFC3339))
 					// TODO: Consider adding support for expiring mints as well (although not strictly needed
@@ -302,11 +311,113 @@ func AllScheduledTasks() []ScheduledTask {
 			},
 		},
 		{
+			ExecutionInterval: 10 * time.Minute,
+			BaseTaskSpec: BaseTaskSpec{
+				Name:         "finalize_revealed_token_transactions",
+				RunInTestEnv: true,
+				Task: func(ctx context.Context, config *so.Config) error {
+					logger := logging.GetLoggerFromContext(ctx)
+					logger.Info("[cron] Finalizing revealed token transactions")
+					db, err := ent.GetDbFromContext(ctx)
+					if err != nil {
+						return fmt.Errorf("failed to get or create current tx for request: %w", err)
+					}
+					tokenTransactions, err := db.TokenTransaction.Query().
+						Where(
+							tokentransaction.And(
+								tokentransaction.StatusEQ(st.TokenTransactionStatusRevealed),
+								tokentransaction.UpdateTimeLT(time.Now().Add(-5*time.Minute)),
+							),
+						).
+						WithPeerSignatures().
+						WithSpentOutput(func(q *ent.TokenOutputQuery) {
+							q.WithOutputCreatedTokenTransaction()
+						}).
+						WithCreatedOutput().
+						All(ctx)
+					if err != nil {
+						return err
+					}
+					logger.Info(fmt.Sprintf("[cron] Found %d token transactions to finalize", len(tokenTransactions)))
+					for _, tokenTransaction := range tokenTransactions {
+						var spentOutputs []*tokenpb.TokenOutputToSpend
+						var createdOutputs []*tokenpb.TokenOutput
+						signaturesPackage := make(map[string]*tokeninternalpb.SignTokenTransactionFromCoordinationResponse)
+
+						if tokenTransaction.Edges.SpentOutput != nil {
+							for _, spentOutput := range tokenTransaction.Edges.SpentOutput {
+								spentOutputs = append(spentOutputs, &tokenpb.TokenOutputToSpend{
+									PrevTokenTransactionHash: spentOutput.Edges.OutputCreatedTokenTransaction.FinalizedTokenTransactionHash,
+									PrevTokenTransactionVout: uint32(spentOutput.CreatedTransactionOutputVout),
+								})
+							}
+						}
+						if tokenTransaction.Edges.CreatedOutput != nil {
+							for _, createdOutput := range tokenTransaction.Edges.CreatedOutput {
+								idStr := createdOutput.ID.String()
+								createdOutputs = append(createdOutputs, &tokenpb.TokenOutput{
+									Id:                            &idStr,
+									OwnerPublicKey:                createdOutput.OwnerPublicKey,
+									RevocationCommitment:          createdOutput.WithdrawRevocationCommitment,
+									WithdrawBondSats:              &createdOutput.WithdrawBondSats,
+									WithdrawRelativeBlockLocktime: &createdOutput.WithdrawRelativeBlockLocktime,
+									TokenPublicKey:                createdOutput.TokenPublicKey,
+									TokenIdentifier:               createdOutput.TokenIdentifier,
+									TokenAmount:                   createdOutput.TokenAmount,
+								})
+							}
+						}
+						protoNetwork, err := common.ProtoNetworkFromSchemaNetwork(tokenTransaction.Edges.SpentOutput[0].Network)
+						if err != nil {
+							return fmt.Errorf("unable to get proto network: %w", err)
+						}
+
+						if tokenTransaction.Edges.PeerSignatures != nil {
+							for _, signature := range tokenTransaction.Edges.PeerSignatures {
+								pubKey, err := keys.ParsePublicKey(signature.OperatorIdentityPublicKey)
+								if err != nil {
+									return fmt.Errorf("unable to parse public key: %w", err)
+								}
+								identifier := config.GetOperatorIdentifierFromIdentityPublicKey(pubKey)
+								signaturesPackage[identifier] = &tokeninternalpb.SignTokenTransactionFromCoordinationResponse{
+									SparkOperatorSignature: signature.Signature,
+								}
+							}
+						}
+						if tokenTransaction.OperatorSignature != nil {
+							signaturesPackage[config.Identifier] = &tokeninternalpb.SignTokenTransactionFromCoordinationResponse{
+								SparkOperatorSignature: tokenTransaction.OperatorSignature,
+							}
+						}
+
+						tokenPb := &tokenpb.TokenTransaction{
+							Version: uint32(tokenTransaction.Version),
+							TokenInputs: &tokenpb.TokenTransaction_TransferInput{
+								TransferInput: &tokenpb.TokenTransferInput{
+									OutputsToSpend: spentOutputs,
+								},
+							},
+							TokenOutputs: createdOutputs,
+							ExpiryTime:   timestamppb.New(tokenTransaction.ExpiryTime),
+							Network:      protoNetwork,
+						}
+
+						signTokenHandler := tokens.NewSignTokenHandler(config)
+						err = signTokenHandler.ExchangeRevocationSecretsAndFinalizeIfPossible(ctx, tokenPb, signaturesPackage, tokenTransaction.FinalizedTokenTransactionHash)
+						if err != nil {
+							return fmt.Errorf("cron job failed to exchange revocation secrets and finalize if possible for token txHash: %x: %w", tokenTransaction.FinalizedTokenTransactionHash, err)
+						}
+					}
+					return nil
+				},
+			},
+		},
+		{
 			ExecutionInterval: 5 * time.Minute,
-			BaseTask: BaseTask{
+			BaseTaskSpec: BaseTaskSpec{
 				Name:         "send_gossip",
 				RunInTestEnv: true,
-				Task: func(ctx context.Context, config *so.Config, _ *lrc20.Client) error {
+				Task: func(ctx context.Context, config *so.Config) error {
 					logger := logging.GetLoggerFromContext(ctx)
 					gossipHandler := handler.NewSendGossipHandler(config)
 					tx, err := ent.GetDbFromContext(ctx)
@@ -331,10 +442,10 @@ func AllScheduledTasks() []ScheduledTask {
 		},
 		{
 			ExecutionInterval: 1 * time.Minute,
-			BaseTask: BaseTask{
+			BaseTaskSpec: BaseTaskSpec{
 				Name:         "complete_utxo_swap",
 				RunInTestEnv: true,
-				Task: func(ctx context.Context, config *so.Config, _ *lrc20.Client) error {
+				Task: func(ctx context.Context, config *so.Config) error {
 					logger := logging.GetLoggerFromContext(ctx)
 					tx, err := ent.GetDbFromContext(ctx)
 					if err != nil {
@@ -343,7 +454,7 @@ func AllScheduledTasks() []ScheduledTask {
 
 					query := tx.UtxoSwap.Query().
 						Where(utxoswap.StatusEQ(st.UtxoSwapStatusCreated)).
-						Where(utxoswap.CoordinatorIdentityPublicKeyEQ(config.IdentityPublicKey())).
+						Where(utxoswap.CoordinatorIdentityPublicKeyEQ(config.IdentityPublicKey().Serialize())).
 						Order(utxoswap.ByCreateTime(sql.OrderDesc())).
 						Limit(100)
 
@@ -397,19 +508,19 @@ func AllScheduledTasks() []ScheduledTask {
 	}
 }
 
-func AllStartupTasks() []StartupTask {
+func AllStartupTasks() []StartupTaskSpec {
 	entityDkgTaskTimeout := 5 * time.Minute
 	entityDkgRetryInterval := 10 * time.Second
 	backfillTokenOutputInterval := 10 * time.Minute
 
-	return []StartupTask{
+	return []StartupTaskSpec{
 		{
 			RetryInterval: &entityDkgRetryInterval,
-			BaseTask: BaseTask{
+			BaseTaskSpec: BaseTaskSpec{
 				Name:         "maybe_reserve_entity_dkg",
 				RunInTestEnv: true,
 				Timeout:      &entityDkgTaskTimeout,
-				Task: func(ctx context.Context, config *so.Config, _ *lrc20.Client) error {
+				Task: func(ctx context.Context, config *so.Config) error {
 					logger := logging.GetLoggerFromContext(ctx)
 					tx, err := ent.GetDbFromContext(ctx)
 					if err != nil {
@@ -482,10 +593,10 @@ func AllStartupTasks() []StartupTask {
 			},
 		},
 		{
-			BaseTask: BaseTask{
+			BaseTaskSpec: BaseTaskSpec{
 				Name:         "backfill_token_freezes_token_identifier",
 				RunInTestEnv: true,
-				Task: func(ctx context.Context, config *so.Config, _ *lrc20.Client) error {
+				Task: func(ctx context.Context, config *so.Config) error {
 					logger := logging.GetLoggerFromContext(ctx)
 					logger.Info("Backfilling token create created_at")
 
@@ -558,10 +669,10 @@ func AllStartupTasks() []StartupTask {
 		},
 		{
 			RetryInterval: &backfillTokenOutputInterval,
-			BaseTask: BaseTask{
+			BaseTaskSpec: BaseTaskSpec{
 				Name:         "backfill_token_output_token_identifiers_and_token_create_edges",
 				RunInTestEnv: true,
-				Task: func(ctx context.Context, config *so.Config, _ *lrc20.Client) error {
+				Task: func(ctx context.Context, config *so.Config) error {
 					logger := logging.GetLoggerFromContext(ctx)
 
 					if !config.Token.EnableBackfillTokenOutputTask {
@@ -633,89 +744,135 @@ func AllStartupTasks() []StartupTask {
 				},
 			},
 		},
+		{
+			RetryInterval: &backfillTokenOutputInterval,
+			BaseTaskSpec: BaseTaskSpec{
+				Name:         "delete_legacy_token_output_data",
+				RunInTestEnv: true,
+				Task: func(ctx context.Context, config *so.Config) error {
+					logger := logging.GetLoggerFromContext(ctx)
+
+					if !config.Token.EnableDeleteLegacyTokenOutputDataTask {
+						logger.Info("Delete legacy token output data is disabled, skipping")
+						return nil
+					}
+
+					tx, err := ent.GetDbFromContext(ctx)
+					if err != nil {
+						return fmt.Errorf("failed to get or create current tx for request: %w", err)
+					}
+
+					deletedTokenFreezes, err := tx.TokenFreeze.Delete().
+						Where(tokenfreeze.TokenCreateIDIsNil()).
+						Exec(ctx)
+					if err != nil {
+						return fmt.Errorf("failed to delete token freezes: %w", err)
+					}
+					logger.Info("Deleted token freezes", "count", deletedTokenFreezes)
+
+					tokenOutputs, err := tx.TokenOutput.Query().
+						Where(
+							tokenoutput.And(
+								tokenoutput.CreateTimeLT(time.Date(2025, time.April, 28, 0, 0, 0, 0, time.UTC)),
+								tokenoutput.TokenIdentifierIsNil(),
+							),
+						).
+						WithOutputCreatedTokenTransaction().
+						WithOutputSpentTokenTransaction().
+						All(ctx)
+					if err != nil {
+						return fmt.Errorf("failed to get token outputs: %w", err)
+					}
+
+					if len(tokenOutputs) == 0 {
+						logger.Info("No legacy token outputs found, task complete")
+						return nil
+					}
+					logger.Info("Found legacy token outputs to delete", "count", len(tokenOutputs))
+
+					var (
+						tokenTransactionIDs []uuid.UUID
+						tokenOutputIDs      []uuid.UUID
+					)
+
+					transactionIDSet := make(map[uuid.UUID]struct{})
+
+					for _, output := range tokenOutputs {
+						tokenOutputIDs = append(tokenOutputIDs, output.ID)
+						if output.Edges.OutputCreatedTokenTransaction != nil {
+							transactionIDSet[output.Edges.OutputCreatedTokenTransaction.ID] = struct{}{}
+						}
+						if output.Edges.OutputSpentTokenTransaction != nil {
+							transactionIDSet[output.Edges.OutputSpentTokenTransaction.ID] = struct{}{}
+						}
+					}
+
+					for txID := range transactionIDSet {
+						tokenTransactionIDs = append(tokenTransactionIDs, txID)
+					}
+
+					logger.Info("Collected entity IDs for deletion",
+						"token_outputs", len(tokenOutputIDs),
+						"token_transactions", len(tokenTransactionIDs))
+
+					deletedOutputs, err := tx.TokenOutput.Delete().
+						Where(tokenoutput.IDIn(tokenOutputIDs...)).
+						Exec(ctx)
+					if err != nil {
+						return fmt.Errorf("failed to delete token outputs: %w", err)
+					}
+					logger.Info("Deleted token outputs", "count", deletedOutputs)
+
+					if len(tokenTransactionIDs) > 0 {
+						deletedTransactions, err := tx.TokenTransaction.Delete().
+							Where(tokentransaction.IDIn(tokenTransactionIDs...)).
+							Exec(ctx)
+						if err != nil {
+							return fmt.Errorf("failed to delete token transactions: %w", err)
+						}
+						logger.Info("Deleted token transactions", "count", deletedTransactions)
+					}
+
+					logger.Info("Successfully completed deletion of legacy token output data",
+						"total_token_outputs_deleted", deletedOutputs,
+						"total_token_transactions_deleted", len(tokenTransactionIDs))
+
+					return nil
+				},
+			},
+		},
 	}
 }
 
-func (t *BaseTask) getTimeout() time.Duration {
+func (t *BaseTaskSpec) getTimeout() time.Duration {
 	if t.Timeout != nil {
 		return *t.Timeout
 	}
 	return defaultTaskTimeout
 }
 
-func (t *BaseTask) RunOnce(config *so.Config, db *ent.Client, lrc20Client *lrc20.Client) error {
+func (t *BaseTaskSpec) RunOnce(config *so.Config, dbClient *ent.Client) error {
 	ctx := context.Background()
-	wrappedTask := t.createWrappedTask()
-	return wrappedTask(ctx, config, db, lrc20Client)
+
+	wrappedTask := t.chainMiddleware(
+		LogMiddleware(),
+		TimeoutMiddleware(),
+		DatabaseMiddleware(db.NewDefaultSessionFactory(dbClient, config.Database.NewTxTimeout)),
+	)
+
+	return wrappedTask.Task(ctx, config)
 }
 
-func (t *BaseTask) createWrappedTask() func(ctx context.Context, cfg *so.Config, dbClient *ent.Client, lrc20 *lrc20.Client) error {
-	return func(ctx context.Context, cfg *so.Config, dbClient *ent.Client, lrc20Client *lrc20.Client) error {
-		logger := logging.GetLoggerFromContext(ctx).
-			With("task.name", t.Name).
-			With("task.id", uuid.New().String())
+func (t *ScheduledTaskSpec) Schedule(scheduler gocron.Scheduler, config *so.Config, dbClient *ent.Client) error {
+	wrappedTask := t.chainMiddleware(
+		LogMiddleware(),
+		TimeoutMiddleware(),
+		DatabaseMiddleware(db.NewDefaultSessionFactory(dbClient, config.Database.NewTxTimeout)),
+	)
 
-		ctx = logging.Inject(ctx, logger)
-
-		timeout := t.getTimeout()
-		ctx, cancel := context.WithTimeoutCause(ctx, timeout, errTaskTimeout)
-		defer cancel()
-
-		done := make(chan error, 1)
-
-		inner := func(ctx context.Context, cfg *so.Config, lrc20Client *lrc20.Client, dbClient *ent.Client) error {
-			dbSession := db.NewSession(dbClient, cfg.Database.NewTxTimeout)
-			ctx = ent.Inject(ctx, dbSession)
-			err := t.Task(ctx, cfg, lrc20Client)
-			if err != nil {
-				logger.Error("Task failed!", "error", err)
-
-				if tx := dbSession.GetTxIfExists(); tx != nil {
-					rollbackErr := tx.Rollback()
-					if rollbackErr != nil {
-						logger.Warn("Failed to rollback transaction after task failure", "error", rollbackErr)
-					}
-				}
-
-				return err
-			}
-
-			if tx := dbSession.GetTxIfExists(); tx != nil {
-				return tx.Commit()
-			}
-			return nil
-		}
-
-		logger.Info("Starting task")
-
-		go func() {
-			done <- inner(ctx, cfg, lrc20Client, dbClient)
-		}()
-
-		select {
-		case err := <-done:
-			return err
-		case <-ctx.Done():
-			if context.Cause(ctx) == errTaskTimeout {
-				logger.Warn("Task timed out!")
-				return ctx.Err()
-			}
-
-			logger.Warn("Context done before task completion! Are we shutting down?", "error", ctx.Err())
-			return ctx.Err()
-		}
-	}
-}
-
-func (t *ScheduledTask) Schedule(
-	scheduler gocron.Scheduler,
-	config *so.Config,
-	db *ent.Client,
-	lrc20Client *lrc20.Client,
-) error {
 	_, err := scheduler.NewJob(
 		gocron.DurationJob(t.ExecutionInterval),
-		gocron.NewTask(t.createWrappedTask(), config, db, lrc20Client),
+		gocron.NewTask(wrappedTask.Task, config),
 		gocron.WithName(t.Name),
 	)
 	if err != nil {
@@ -725,67 +882,52 @@ func (t *ScheduledTask) Schedule(
 	return nil
 }
 
-type Monitor struct {
-	taskCount    metric.Int64Counter
-	taskDuration metric.Float64Histogram
+// Wrap the task with the given middleware. This returns a new BaseTaskSpec whose Task function
+// is wrapped with the provided middleware. The original task's fields are preserved.
+func (t *BaseTaskSpec) wrapMiddleware(middleware TaskMiddleware) *BaseTaskSpec {
+	return &BaseTaskSpec{
+		Name:         t.Name,
+		Timeout:      t.Timeout,
+		RunInTestEnv: t.RunInTestEnv,
+		Task: func(ctx context.Context, config *so.Config) error {
+			return middleware(ctx, config, t)
+		},
+	}
 }
 
-func NewMonitor() (*Monitor, error) {
-	meter := otel.Meter("gocron")
+// Wrap the task with the given middlewares chained together. The middlewares have their ordering
+// preserved, so the first middelware in the slice will be the outermost, and the last middleware
+// will be the innermost.
+//
+// +------- Middleware 1 -------+
+// | +----- Middleware 2 -----+ |
+// | | +--- Middleware 3 ---+ | |
+// | | |                    | | |
+// | | |   Task (t.Task)    | | |
+// | | |                    | | |
+// | | +--------------------+ | |
+// | +------------------------+ |
+// +----------------------------+
+//
+// Once the task has completed, the middlewares will be unwound in reverse order, so the last
+// middleware will be the first to complete.
+func (t *BaseTaskSpec) chainMiddleware(
+	middlewares ...TaskMiddleware,
+) *BaseTaskSpec {
+	// Apply the middleware to the task so that the last middleware is the inner most.
+	currTask := t
 
-	jobCount, err := meter.Int64Counter(
-		"gocron.task_count_total",
-		metric.WithDescription("Total number of tasks executed"),
-	)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create task count metric: %w", err)
+	for i := len(middlewares) - 1; i >= 0; i-- {
+		innerTask, i := currTask, i
+		currTask = innerTask.wrapMiddleware(middlewares[i])
 	}
 
-	jobDuration, err := meter.Float64Histogram(
-		"gocron.task_duration_milliseconds",
-		metric.WithDescription("Duration of tasks in milliseconds."),
-		metric.WithUnit("ms"),
-		metric.WithExplicitBucketBoundaries(
-			// Replace the buckets at the lower end (e.g. 5, 10, 25, 50, 75ms) with buckets up to 60s, to
-			// capture the longer task durations.
-			100, 250, 500, 750, 1000, 2500, 5000, 7500, 10000, 15000, 30000, 45000, 60000,
-		),
-	)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create task duration metric: %w", err)
-	}
-
-	return &Monitor{
-		taskCount:    jobCount,
-		taskDuration: jobDuration,
-	}, nil
-}
-
-func (t *Monitor) IncrementJob(_ uuid.UUID, name string, _ []string, status gocron.JobStatus) {
-	t.taskCount.Add(
-		context.Background(),
-		1,
-		metric.WithAttributes(
-			attribute.String("task.name", name),
-			attribute.String("task.result", string(status)),
-		),
-	)
-}
-
-func (t *Monitor) RecordJobTiming(startTime, endTime time.Time, _ uuid.UUID, name string, _ []string) {
-	duration := endTime.Sub(startTime).Milliseconds()
-	t.taskDuration.Record(
-		context.Background(),
-		float64(duration),
-		metric.WithAttributes(
-			attribute.String("task.name", name),
-		),
-	)
+	return currTask
 }
 
 // RunStartupTasks runs startup tasks with optional retry logic.
 // Any task with a non-nil RetryInterval will be retried in the background on failure.
-func RunStartupTasks(config *so.Config, db *ent.Client, lrc20Client *lrc20.Client, runningLocally bool) error {
+func RunStartupTasks(config *so.Config, db *ent.Client, runningLocally bool) error {
 	slog.Info("Running startup tasks...")
 
 	for _, task := range AllStartupTasks() {
@@ -793,13 +935,13 @@ func RunStartupTasks(config *so.Config, db *ent.Client, lrc20Client *lrc20.Clien
 			slog.Info("Running startup task", "task", task.Name)
 
 			if task.RetryInterval != nil {
-				go func(task StartupTask) {
+				go func(task StartupTaskSpec) {
 					timeout := task.getTimeout()
 					retryInterval := *task.RetryInterval
 
 					startTime := time.Now()
 					for {
-						err := task.RunOnce(config, db, lrc20Client)
+						err := task.RunOnce(config, db)
 						if err == nil {
 							slog.Info("Startup task completed successfully", "task", task.Name)
 							break
@@ -815,7 +957,7 @@ func RunStartupTasks(config *so.Config, db *ent.Client, lrc20Client *lrc20.Clien
 					}
 				}(task)
 			} else {
-				err := task.RunOnce(config, db, lrc20Client)
+				err := task.RunOnce(config, db)
 				if err != nil {
 					slog.Error("Startup task failed", "task", task.Name, "error", err)
 				} else {

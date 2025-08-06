@@ -8,9 +8,13 @@ import (
 	"strings"
 	"time"
 
+	"github.com/lightsparkdev/spark/common/keys"
+
 	"github.com/lightsparkdev/spark"
 
 	tokenpb "github.com/lightsparkdev/spark/proto/spark_token"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"github.com/google/uuid"
@@ -22,8 +26,8 @@ import (
 	"github.com/lightsparkdev/spark/so/authz"
 	"github.com/lightsparkdev/spark/so/ent"
 	st "github.com/lightsparkdev/spark/so/ent/schema/schematype"
+	"github.com/lightsparkdev/spark/so/errors"
 	"github.com/lightsparkdev/spark/so/helper"
-	"github.com/lightsparkdev/spark/so/lrc20"
 	"github.com/lightsparkdev/spark/so/protoconverter"
 	"github.com/lightsparkdev/spark/so/tokens"
 	"github.com/lightsparkdev/spark/so/utils"
@@ -31,28 +35,25 @@ import (
 
 type StartTokenTransactionHandler struct {
 	config           *so.Config
-	lrc20Client      *lrc20.Client
 	enablePreemption bool
 	prepareHandler   *InternalPrepareTokenHandler
 }
 
 // NewStartTokenTransactionHandler creates a new StartTokenTransactionHandler.
-func NewStartTokenTransactionHandler(config *so.Config, lrc20Client *lrc20.Client) *StartTokenTransactionHandler {
+func NewStartTokenTransactionHandler(config *so.Config) *StartTokenTransactionHandler {
 	return &StartTokenTransactionHandler{
 		config:           config,
-		lrc20Client:      lrc20Client,
 		enablePreemption: false,
-		prepareHandler:   NewInternalPrepareTokenHandler(config, lrc20Client),
+		prepareHandler:   NewInternalPrepareTokenHandler(config),
 	}
 }
 
 // NewStartTokenTransactionHandlerWithPreemption creates a new StartTokenTransactionHandler with pre-emption enabled.
-func NewStartTokenTransactionHandlerWithPreemption(config *so.Config, lrc20Client *lrc20.Client) *StartTokenTransactionHandler {
+func NewStartTokenTransactionHandlerWithPreemption(config *so.Config) *StartTokenTransactionHandler {
 	return &StartTokenTransactionHandler{
 		config:           config,
-		lrc20Client:      lrc20Client,
 		enablePreemption: true,
-		prepareHandler:   NewInternalPrepareTokenHandlerWithPreemption(config, lrc20Client),
+		prepareHandler:   NewInternalPrepareTokenHandlerWithPreemption(config),
 	}
 }
 
@@ -83,11 +84,16 @@ func (h *StartTokenTransactionHandler) StartTokenTransaction(ctx context.Context
 	// Also, check that this SO was the coordinator for the transaction. This is necessary because only the coordinator
 	// receives direct evidence from each SO individually that a threshold of SOs have validated and saved the transaction.
 	if previouslyCreatedTokenTransaction != nil &&
-		previouslyCreatedTokenTransaction.Status == st.TokenTransactionStatusStarted &&
-		bytes.Equal(previouslyCreatedTokenTransaction.CoordinatorPublicKey, h.config.IdentityPublicKey()) {
-		tokens.LogWithTransactionEnt(ctx, "Found existing token transaction in started state with matching coordinator",
-			previouslyCreatedTokenTransaction, slog.LevelInfo)
-		return h.regenerateStartResponseForDuplicateRequest(ctx, previouslyCreatedTokenTransaction)
+		previouslyCreatedTokenTransaction.Status == st.TokenTransactionStatusStarted {
+		coordinatorPubKey, err := keys.ParsePublicKey(previouslyCreatedTokenTransaction.CoordinatorPublicKey)
+		if err != nil {
+			return nil, err
+		}
+		if coordinatorPubKey.Equals(h.config.IdentityPublicKey()) {
+			tokens.LogWithTransactionEnt(ctx, "Found existing token transaction in started state with matching coordinator",
+				previouslyCreatedTokenTransaction, slog.LevelInfo)
+			return h.regenerateStartResponseForDuplicateRequest(ctx, previouslyCreatedTokenTransaction)
+		}
 	}
 
 	if h.enablePreemption {
@@ -118,7 +124,12 @@ func (h *StartTokenTransactionHandler) StartTokenTransaction(ctx context.Context
 		)
 	})
 	if err != nil {
-		return nil, tokens.FormatErrorWithTransactionProto(tokens.ErrFailedToExecuteWithNonCoordinator, req.PartialTokenTransaction, err)
+		formattedError := tokens.FormatErrorWithTransactionProto(tokens.ErrFailedToExecuteWithNonCoordinator, req.PartialTokenTransaction, err)
+		grpcStatus, ok := status.FromError(err)
+		if ok && (grpcStatus.Code() == codes.Aborted || grpcStatus.Code() == codes.AlreadyExists) {
+			formattedError = errors.WrapErrorWithGRPCCode(formattedError, grpcStatus.Code())
+		}
+		return nil, formattedError
 	}
 
 	// Only save in the coordinator SO after receiving confirmation from all other SOs. This ensures that if
@@ -128,7 +139,7 @@ func (h *StartTokenTransactionHandler) StartTokenTransaction(ctx context.Context
 		KeyshareIds:                keyshareIDStrings,
 		FinalTokenTransaction:      finalTokenTransaction,
 		TokenTransactionSignatures: req.PartialTokenTransactionOwnerSignatures,
-		CoordinatorPublicKey:       h.config.IdentityPublicKey(),
+		CoordinatorPublicKey:       h.config.IdentityPublicKey().Serialize(),
 	})
 	if err != nil {
 		return nil, tokens.FormatErrorWithTransactionProto(tokens.ErrFailedToExecuteWithCoordinator, req.PartialTokenTransaction, err)
@@ -148,7 +159,7 @@ func (h *StartTokenTransactionHandler) StartTokenTransaction(ctx context.Context
 // callPrepareTokenTransactionInternal handles calling the PrepareTokenTransactionInternal RPC on an operator
 func callPrepareTokenTransactionInternal(ctx context.Context, operator *so.SigningOperator,
 	finalTokenTransaction *tokenpb.TokenTransaction, signaturesWithIndex []*tokenpb.SignatureWithIndex,
-	keyshareIDStrings []string, coordinatorPublicKey []byte,
+	keyshareIDStrings []string, coordinatorPublicKey keys.Public,
 	callSparkTokenInternal bool,
 ) error {
 	conn, err := operator.NewGRPCConnection()
@@ -161,7 +172,7 @@ func callPrepareTokenTransactionInternal(ctx context.Context, operator *so.Signi
 		KeyshareIds:                keyshareIDStrings,
 		FinalTokenTransaction:      finalTokenTransaction,
 		TokenTransactionSignatures: signaturesWithIndex,
-		CoordinatorPublicKey:       coordinatorPublicKey,
+		CoordinatorPublicKey:       coordinatorPublicKey.Serialize(),
 	}
 	if callSparkTokenInternal {
 		client := tokeninternalpb.NewSparkTokenInternalServiceClient(conn)
@@ -355,7 +366,7 @@ func logWillPreemptExistingTransaction(ctx context.Context, existingTransaction 
 func rejectNewTransaction(ctx context.Context, newTransaction *tokenpb.TokenTransaction, existingTransaction *ent.TokenTransaction, reason, details string) error {
 	tokens.LogWithTransactionEnt(ctx, fmt.Sprintf("Rejecting new transaction due to existing transaction having %s (%s)", reason, details),
 		existingTransaction, slog.LevelInfo)
-	return tokens.FormatErrorWithTransactionProto(tokens.ErrTransactionPreemptedByExisting, newTransaction, nil)
+	return tokens.NewTransactionPreemptedError(newTransaction, reason, details)
 }
 
 // constructFinalTokenTransaction constructs the final token transaction from the partial token transaction

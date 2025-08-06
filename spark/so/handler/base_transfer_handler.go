@@ -8,6 +8,8 @@ import (
 	"slices"
 	"time"
 
+	"github.com/lightsparkdev/spark/common/keys"
+
 	"github.com/btcsuite/btcd/wire"
 	"github.com/decred/dcrd/dcrec/secp256k1/v4"
 	"github.com/decred/dcrd/dcrec/secp256k1/v4/ecdsa"
@@ -61,7 +63,7 @@ func validateLeafRefundTxOutput(refundTx *wire.MsgTx, receiverIdentityPublicKey 
 	if len(refundTx.TxOut) == 0 {
 		return fmt.Errorf("refund tx must have at least 1 output")
 	}
-	receiverIdentityPubkey, err := secp256k1.ParsePubKey(receiverIdentityPublicKey)
+	receiverIdentityPubkey, err := keys.ParsePublicKey(receiverIdentityPublicKey)
 	if err != nil {
 		return fmt.Errorf("unable to parse receiver pubkey: %w", err)
 	}
@@ -626,6 +628,10 @@ func (h *BaseTransferHandler) executeCancelTransfer(ctx context.Context, transfe
 		transfer.Status != st.TransferStatusSenderKeyTweakPending {
 		return fmt.Errorf("transfer %s is expected to be at status TransferStatusSenderInitiated, TransferStatusSenderKeyTweakPending but %s found", transfer.ID.String(), transfer.Status)
 	}
+
+	if transfer.Status == st.TransferStatusSenderKeyTweakPending && (transfer.Type != st.TransferTypeCooperativeExit && transfer.Type != st.TransferTypePreimageSwap) {
+		return fmt.Errorf("transfer %s at status TransferStatusSenderKeyTweakPending can only be cancelled for cooperative exit or preimage swap, but %s found", transfer.ID.String(), transfer.Type)
+	}
 	var err error
 	transfer, err = transfer.Update().SetStatus(st.TransferStatusReturned).Save(ctx)
 	if err != nil {
@@ -773,7 +779,7 @@ func (h *BaseTransferHandler) validateTransferPackage(_ context.Context, transfe
 		return nil, fmt.Errorf("no key tweaks found for SO %s", h.config.Identifier)
 	}
 
-	decryptionPrivateKey := eciesgo.NewPrivateKeyFromBytes(h.config.IdentityPrivateKey)
+	decryptionPrivateKey := eciesgo.NewPrivateKeyFromBytes(h.config.IdentityPrivateKey.Serialize())
 	leafTweaksBinary, err := eciesgo.Decrypt(decryptionPrivateKey, leafTweaksCipherText)
 	if err != nil {
 		return nil, fmt.Errorf("failed to decrypt key tweaks: %w", err)

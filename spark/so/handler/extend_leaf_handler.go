@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/lightsparkdev/spark/common/keys"
+
 	"github.com/btcsuite/btcd/wire"
 	"github.com/google/uuid"
 	"github.com/lightsparkdev/spark/common"
@@ -208,17 +210,17 @@ func (h *ExtendLeafHandler) extendLeaf(ctx context.Context, req *pb.ExtendLeafRe
 	var directTx, directRefundTx, directFromCpfpRefundTx []byte
 	if req.DirectNodeTxSigningJob != nil {
 		directTx = req.DirectNodeTxSigningJob.RawTx
-	} else if requireDirectTx {
+	} else if requireDirectTx && len(leaf.DirectTx) > 0 {
 		return nil, fmt.Errorf("DirectNodeTxSigningJob is required. Please upgrade to the latest SDK version")
 	}
 	if req.DirectRefundTxSigningJob != nil {
 		directRefundTx = req.DirectRefundTxSigningJob.RawTx
-	} else if requireDirectTx {
+	} else if requireDirectTx && len(leaf.DirectTx) > 0 {
 		return nil, fmt.Errorf("DirectRefundTxSigningJob is required. Please upgrade to the latest SDK version")
 	}
 	if req.DirectFromCpfpRefundTxSigningJob != nil {
 		directFromCpfpRefundTx = req.DirectFromCpfpRefundTxSigningJob.RawTx
-	} else if requireDirectTx {
+	} else if requireDirectTx && len(leaf.DirectTx) > 0 {
 		return nil, fmt.Errorf("DirectFromCpfpRefundTxSigningJob is required. Please upgrade to the latest SDK version")
 	}
 
@@ -350,11 +352,15 @@ func createSigningJob(
 	if err != nil {
 		return nil, fmt.Errorf("failed to get signing keyshare id: %w", err)
 	}
+	verifyingPubKey, err := keys.ParsePublicKey(leaf.VerifyingPubkey)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse verifying public key: %w", err)
+	}
 	return &helper.SigningJob{
 		JobID:             uuid.New().String(),
 		SigningKeyshareID: signingKeyshare.ID,
 		Message:           sigHash,
-		VerifyingKey:      leaf.VerifyingPubkey,
+		VerifyingKey:      &verifyingPubKey,
 		UserCommitment:    newNodeUserNonceCommitment,
 	}, nil
 }

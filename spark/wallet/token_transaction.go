@@ -1,7 +1,6 @@
 package wallet
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"log"
@@ -9,6 +8,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/lightsparkdev/spark/common/keys"
 
 	"github.com/btcsuite/btcd/btcec/v2/schnorr"
 	"github.com/decred/dcrd/dcrec/secp256k1/v4"
@@ -49,7 +50,7 @@ func StartTokenTransaction(
 	ctx context.Context,
 	config *Config,
 	tokenTransaction *pb.TokenTransaction,
-	ownerPrivateKeys []*secp256k1.PrivateKey,
+	ownerPrivateKeys []keys.Private,
 	startSignatureIndexOrder []uint32,
 ) (*pb.StartTokenTransactionResponse, []byte, []byte, error) {
 	sparkConn, err := common.NewGRPCConnectionWithTestTLS(config.CoodinatorAddress(), nil)
@@ -69,7 +70,7 @@ func StartTokenTransaction(
 	// Attach operator public keys to the transaction
 	var operatorKeys [][]byte
 	for _, operator := range config.SigningOperators {
-		operatorKeys = append(operatorKeys, operator.IdentityPublicKey)
+		operatorKeys = append(operatorKeys, operator.IdentityPublicKey.Serialize())
 	}
 	tokenTransaction.SparkOperatorIdentityPublicKeys = operatorKeys
 
@@ -83,8 +84,8 @@ func StartTokenTransaction(
 	// Gather owner (issuer or output) signatures
 	var ownerSignaturesWithIndex []*pb.SignatureWithIndex
 	if tokenTransaction.GetMintInput() != nil || tokenTransaction.GetCreateInput() != nil {
-		signingPrivKeySecp := secp256k1.PrivKeyFromBytes(config.IdentityPrivateKey.Serialize())
-		sig, err := SignHashSlice(config, signingPrivKeySecp, partialTokenTransactionHash)
+
+		sig, err := SignHashSlice(config, config.IdentityPrivateKey, partialTokenTransactionHash)
 		if err != nil {
 			return nil, nil, nil, fmt.Errorf("failed to create signature: %w", err)
 		}
@@ -135,7 +136,7 @@ func StartTokenTransaction(
 	}
 
 	startResponse, err := sparkClient.StartTokenTransaction(tmpCtx, &pb.StartTokenTransactionRequest{
-		IdentityPublicKey:       config.IdentityPublicKey(),
+		IdentityPublicKey:       config.IdentityPublicKey().Serialize(),
 		PartialTokenTransaction: tokenTransaction,
 		TokenTransactionSignatures: &pb.TokenTransactionSignatures{
 			OwnerSignatures: ownerSignaturesWithIndex,
@@ -175,7 +176,7 @@ func StartTokenTransaction(
 func createOperatorSpecificSignature(
 	config *Config,
 	operatorPublicKey SerializedPublicKey,
-	privKey *secp256k1.PrivateKey,
+	privKey keys.Private,
 	inputIndex uint32,
 	finalTxHash []byte,
 ) (*pb.OperatorSpecificOwnerSignature, error) {
@@ -216,7 +217,11 @@ func getOperatorsToContact(
 			// Find the operator with this public key
 			found := false
 			for _, operator := range config.SigningOperators {
-				if bytes.Equal(operator.IdentityPublicKey, opPubKey) {
+				opIDPubKey, err := keys.ParsePublicKey(opPubKey)
+				if err != nil {
+					return nil, nil, err
+				}
+				if operator.IdentityPublicKey.Equals(opIDPubKey) {
 					operatorsToContact = append(operatorsToContact, operator)
 					selectedPubKeys = append(selectedPubKeys, opPubKey)
 					found = true
@@ -231,7 +236,7 @@ func getOperatorsToContact(
 		// Use all signing operators
 		for _, operator := range config.SigningOperators {
 			operatorsToContact = append(operatorsToContact, operator)
-			selectedPubKeys = append(selectedPubKeys, operator.IdentityPublicKey)
+			selectedPubKeys = append(selectedPubKeys, operator.IdentityPublicKey.Serialize())
 		}
 	}
 
@@ -249,7 +254,7 @@ func SignTokenTransaction(
 	finalTx *pb.TokenTransaction,
 	finalTxHash []byte,
 	operatorIdentityPublicKeys []SerializedPublicKey,
-	ownerPrivateKeys []*secp256k1.PrivateKey,
+	ownerPrivateKeys []keys.Private,
 	signatureOrder []uint32,
 ) ([][]*KeyshareWithOperatorIndex, OperatorSignatures, error) {
 	operatorSignaturesMap := make(OperatorSignatures)
@@ -267,9 +272,9 @@ func SignTokenTransaction(
 	}
 
 	for operatorIndex, operator := range operatorsToContact {
-		operatorConn, err := common.NewGRPCConnectionWithTestTLS(operator.Address, nil)
+		operatorConn, err := common.NewGRPCConnectionWithTestTLS(operator.AddressRpc, nil)
 		if err != nil {
-			log.Printf("Error while establishing gRPC connection to operator at %s: %v", operator.Address, err)
+			log.Printf("Error while establishing gRPC connection to operator at %s: %v", operator.AddressRpc, err)
 			return nil, nil, err
 		}
 		defer operatorConn.Close()
@@ -307,7 +312,7 @@ func SignTokenTransaction(
 		signTokenTransactionResponse, err := operatorClient.SignTokenTransaction(operatorCtx, &pb.SignTokenTransactionRequest{
 			FinalTokenTransaction:      finalTx,
 			OperatorSpecificSignatures: operatorSpecificSignatures,
-			IdentityPublicKey:          config.IdentityPublicKey(),
+			IdentityPublicKey:          config.IdentityPublicKey().Serialize(),
 		})
 		if err != nil {
 			log.Printf("Error while calling SignTokenTransaction with operator %s: %v", operator.Identifier, err)
@@ -315,8 +320,8 @@ func SignTokenTransaction(
 		}
 		// Validate signature
 		operatorSig := signTokenTransactionResponse.SparkOperatorSignature
-		if err := utils.ValidateOwnershipSignature(operatorSig, finalTxHash, operator.IdentityPublicKey); err != nil {
-			return nil, nil, fmt.Errorf("invalid signature from operator with public key %x: %w", operator.IdentityPublicKey, err)
+		if err := utils.ValidateOwnershipSignature(operatorSig, finalTxHash, operator.IdentityPublicKey.Serialize()); err != nil {
+			return nil, nil, fmt.Errorf("invalid signature from operator with public key %s: %w", operator.IdentityPublicKey, err)
 		}
 
 		// Store output keyshares if transfer
@@ -379,7 +384,7 @@ func FinalizeTokenTransaction(
 	outputToSpendRevocationCommitments []SerializedPublicKey,
 ) error {
 	// Recover secrets from keyshares
-	outputRecoveredSecrets := make([]*secp256k1.PrivateKey, len(finalTx.GetTransferInput().GetOutputsToSpend()))
+	outputRecoveredSecrets := make([]keys.Private, len(finalTx.GetTransferInput().GetOutputsToSpend()))
 	for i, outputKeyshares := range outputRevocationKeyshares {
 		shares := make([]*secretsharing.SecretShare, len(outputKeyshares))
 		for j, keyshareWithOperatorIndex := range outputKeyshares {
@@ -395,7 +400,7 @@ func FinalizeTokenTransaction(
 			return fmt.Errorf("failed to recover keyshare for output %d: %w", i, err)
 		}
 
-		privKey, err := common.PrivateKeyFromBigInt(recoveredKey)
+		privKey, err := keys.PrivateKeyFromBigInt(recoveredKey)
 		if err != nil {
 			return fmt.Errorf("failed to convert recovered keyshare to private key for output %d: %w", i, err)
 		}
@@ -403,8 +408,16 @@ func FinalizeTokenTransaction(
 		outputRecoveredSecrets[i] = privKey
 	}
 
+	parsedCommitments := make([]keys.Public, len(outputToSpendRevocationCommitments))
+	for i, commitment := range outputToSpendRevocationCommitments {
+		parsed, err := keys.ParsePublicKey(commitment)
+		if err != nil {
+			return fmt.Errorf("failed to parse commitment for output %d: %w", i, err)
+		}
+		parsedCommitments[i] = parsed
+	}
 	// Validate revocation keys
-	if err := utils.ValidateRevocationKeys(outputRecoveredSecrets, toByteSlices(outputToSpendRevocationCommitments)); err != nil {
+	if err := utils.ValidateRevocationKeys(outputRecoveredSecrets, parsedCommitments); err != nil {
 		return fmt.Errorf("invalid revocation keys: %w", err)
 	}
 
@@ -422,9 +435,9 @@ func FinalizeTokenTransaction(
 	}
 
 	for _, operator := range operatorsToContact {
-		operatorConn, err := common.NewGRPCConnectionWithTestTLS(operator.Address, nil)
+		operatorConn, err := common.NewGRPCConnectionWithTestTLS(operator.AddressRpc, nil)
 		if err != nil {
-			log.Printf("Error while establishing gRPC connection to operator at %s: %v", operator.Address, err)
+			log.Printf("Error while establishing gRPC connection to operator at %s: %v", operator.AddressRpc, err)
 			return err
 		}
 		defer operatorConn.Close()
@@ -439,7 +452,7 @@ func FinalizeTokenTransaction(
 		_, err = operatorClient.FinalizeTokenTransaction(operatorCtx, &pb.FinalizeTokenTransactionRequest{
 			FinalTokenTransaction: finalTx,
 			RevocationSecrets:     revocationSecrets,
-			IdentityPublicKey:     config.IdentityPublicKey(),
+			IdentityPublicKey:     config.IdentityPublicKey().Serialize(),
 		})
 		if err != nil {
 			log.Printf("Error while finalizing token transaction with operator %s: %v", operator.Identifier, err)
@@ -456,7 +469,7 @@ func BroadcastTokenTransaction(
 	ctx context.Context,
 	config *Config,
 	tokenTransaction *pb.TokenTransaction,
-	ownerPrivateKeys []*secp256k1.PrivateKey,
+	ownerPrivateKeys []keys.Private,
 	outputToSpendRevocationCommitments []SerializedPublicKey,
 ) (*pb.TokenTransaction, error) {
 	// 1) Start token transaction
@@ -520,9 +533,9 @@ func FreezeTokens(
 	var lastResponse *pb.FreezeTokensResponse
 	timestamp := uint64(time.Now().UnixMilli())
 	for _, operator := range config.SigningOperators {
-		operatorConn, err := common.NewGRPCConnectionWithTestTLS(operator.Address, nil)
+		operatorConn, err := common.NewGRPCConnectionWithTestTLS(operator.AddressRpc, nil)
 		if err != nil {
-			log.Printf("Error while establishing gRPC connection to coordinator at %s: %v", operator.Address, err)
+			log.Printf("Error while establishing gRPC connection to coordinator at %s: %v", operator.AddressRpc, err)
 			return nil, err
 		}
 		defer operatorConn.Close()
@@ -537,7 +550,7 @@ func FreezeTokens(
 		payloadSparkProto := &pb.FreezeTokensPayload{
 			OwnerPublicKey:            ownerPublicKey,
 			TokenPublicKey:            tokenPublicKey,
-			OperatorIdentityPublicKey: operator.IdentityPublicKey,
+			OperatorIdentityPublicKey: operator.IdentityPublicKey.Serialize(),
 			IssuerProvidedTimestamp:   timestamp,
 			ShouldUnfreeze:            shouldUnfreeze,
 		}
@@ -546,7 +559,7 @@ func FreezeTokens(
 			Version:                   0,
 			OwnerPublicKey:            ownerPublicKey,
 			TokenPublicKey:            tokenPublicKey,
-			OperatorIdentityPublicKey: operator.IdentityPublicKey,
+			OperatorIdentityPublicKey: operator.IdentityPublicKey.Serialize(),
 			IssuerProvidedTimestamp:   timestamp,
 			ShouldUnfreeze:            shouldUnfreeze,
 		}
@@ -555,12 +568,10 @@ func FreezeTokens(
 			return nil, fmt.Errorf("failed to hash freeze tokens payload: %w", err)
 		}
 
-		signingPrivKeySecp := secp256k1.PrivKeyFromBytes(config.IdentityPrivateKey.Serialize())
-		sig, err := SignHashSlice(config, signingPrivKeySecp, payloadHash)
+		issuerSignature, err := SignHashSlice(config, config.IdentityPrivateKey, payloadHash)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create signature: %w", err)
 		}
-		issuerSignature := sig
 
 		request := &pb.FreezeTokensRequest{
 			FreezeTokensPayload: payloadSparkProto,
@@ -736,17 +747,17 @@ func parseHexIdentifierToUint64(binaryIdentifier string) uint64 {
 	return value
 }
 
-// Helper function to create either Schnorr or ECDSA signature
-func SignHashSlice(config *Config, privKey *secp256k1.PrivateKey, hash []byte) ([]byte, error) {
+// SignHashSlice is a helper function to create either Schnorr or ECDSA signature
+func SignHashSlice(config *Config, privKey keys.Private, hash []byte) ([]byte, error) {
 	if config.UseTokenTransactionSchnorrSignatures {
-		sig, err := schnorr.Sign(privKey, hash)
+		sig, err := schnorr.Sign(privKey.ToBTCEC(), hash)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create Schnorr signature: %w", err)
 		}
 		return sig.Serialize(), nil
 	}
 
-	sig := ecdsa.Sign(privKey, hash)
+	sig := ecdsa.Sign(privKey.ToBTCEC(), hash)
 	return sig.Serialize(), nil
 }
 

@@ -1,4 +1,4 @@
-import { isNode, mapCurrencyAmount } from "@lightsparkdev/core";
+import { isNode, isObject, mapCurrencyAmount } from "@lightsparkdev/core";
 import {
   bytesToHex,
   bytesToNumberBE,
@@ -19,7 +19,7 @@ import {
   RPCError,
   ValidationError,
 } from "../errors/types.js";
-import SspClient from "../graphql/client.js";
+import SspClient, { TransferWithUserRequest } from "../graphql/client.js";
 import {
   BitcoinNetwork,
   ClaimStaticDepositOutput,
@@ -35,7 +35,6 @@ import {
   StaticDepositQuoteOutput,
   UserLeafInput,
 } from "../graphql/objects/index.js";
-import GraphQLTransferObj from "../graphql/objects/Transfer.js";
 import {
   DepositAddressQueryResult,
   OutputWithPreviousTransactionData,
@@ -75,6 +74,7 @@ import {
   getP2TRScriptFromPublicKey,
   getP2WPKHAddressFromPublicKey,
   getSigHashFromTx,
+  getTxEstimatedVbytesSizeByNumberOfInputsOutputs,
   getTxFromRawTxBytes,
   getTxFromRawTxHex,
   getTxId,
@@ -88,10 +88,19 @@ import {
   NetworkType,
 } from "../utils/network.js";
 import { sumAvailableTokens } from "../utils/token-transactions.js";
-import { getNextTransactionSequence } from "../utils/transaction.js";
+import {
+  doesLeafNeedRefresh,
+  getCurrentTimelock,
+} from "../utils/transaction.js";
 
 import { LRCWallet } from "@buildonspark/lrc20-sdk";
 import { sha256 } from "@noble/hashes/sha2";
+import { trace, Tracer } from "@opentelemetry/api";
+import {
+  ConsoleSpanExporter,
+  SimpleSpanProcessor,
+  SpanProcessor,
+} from "@opentelemetry/sdk-trace-base";
 import { EventEmitter } from "eventemitter3";
 import { isReactNative } from "../constants.js";
 import { Network as NetworkProto, networkToJSON } from "../proto/spark.js";
@@ -107,6 +116,7 @@ import { BitcoinFaucet } from "../tests/utils/test-faucet.js";
 import {
   mapTransferToWalletTransfer,
   mapTreeNodeToWalletLeaf,
+  UserRequestType,
   WalletLeaf,
   WalletTransfer,
 } from "../types/sdk-types.js";
@@ -117,6 +127,7 @@ import {
   SparkAddressFormat,
 } from "../utils/address.js";
 import { chunkArray } from "../utils/chunkArray.js";
+import { getFetch } from "../utils/fetch.js";
 import { addPublicKeys } from "../utils/keys.js";
 import {
   Bech32mTokenIdentifier,
@@ -183,14 +194,7 @@ export class SparkWallet extends EventEmitter {
   // Add this property near the top of the class with other private properties
   private claimTransfersInterval: NodeJS.Timeout | null = null;
 
-  protected wrapWithOtelSpan<T>(
-    name: string,
-    fn: (...args: any[]) => Promise<T>,
-  ): (...args: any[]) => Promise<T> {
-    return async (...args: any[]): Promise<T> => {
-      return await fn(...args);
-    };
-  }
+  private tracer: Tracer | null = null;
 
   protected constructor(options?: ConfigOptions, signer?: SparkSigner) {
     super();
@@ -225,6 +229,9 @@ export class SparkWallet extends EventEmitter {
       this.connectionManager,
       this.signingService,
     );
+
+    this.tracer = trace.getTracer(this.tracerId);
+    this.wrapSparkWalletMethodsWithTracing();
   }
 
   public static async initialize({
@@ -234,6 +241,8 @@ export class SparkWallet extends EventEmitter {
     options,
   }: SparkWalletProps) {
     const wallet = new SparkWallet(options, signer);
+    wallet.initializeTracer(wallet);
+
     const initResponse = await wallet.initWallet(mnemonicOrSeed, accountNumber);
 
     return {
@@ -1046,26 +1055,80 @@ export class SparkWallet extends EventEmitter {
       })),
     );
 
-    const { transfer, signatureMap } =
-      await this.transferService.startSwapSignRefund(
-        leafKeyTweaks,
-        hexToBytes(this.config.getSspIdentityPublicKey()),
-        new Date(Date.now() + 2 * 60 * 1000),
-      );
+    const {
+      transfer,
+      signatureMap,
+      directSignatureMap,
+      directFromCpfpSignatureMap,
+    } = await this.transferService.startSwapSignRefund(
+      leafKeyTweaks,
+      hexToBytes(this.config.getSspIdentityPublicKey()),
+      new Date(Date.now() + 2 * 60 * 1000),
+    );
+
     try {
       if (!transfer.leaves[0]?.leaf) {
+        console.error("[processSwapBatch] First leaf is missing");
         throw new Error("Failed to get leaf");
       }
 
-      const refundSignature = signatureMap.get(transfer.leaves[0].leaf.id);
-      if (!refundSignature) {
-        throw new Error("Failed to get refund signature");
+      const cpfpRefundSignature = signatureMap.get(transfer.leaves[0].leaf.id);
+      if (!cpfpRefundSignature) {
+        console.error(
+          "[processSwapBatch] Missing CPFP refund signature for first leaf",
+        );
+        throw new Error("Failed to get CPFP refund signature");
       }
 
-      const { adaptorPrivateKey, adaptorSignature } =
-        generateAdaptorFromSignature(refundSignature);
+      const directRefundSignature = directSignatureMap.get(
+        transfer.leaves[0].leaf.id,
+      );
+      if (!directRefundSignature) {
+        console.error(
+          "[processSwapBatch] Missing direct refund signature for first leaf",
+        );
+        throw new Error("Failed to get direct refund signature");
+      }
+
+      const directFromCpfpRefundSignature = directFromCpfpSignatureMap.get(
+        transfer.leaves[0].leaf.id,
+      );
+      if (!directFromCpfpRefundSignature) {
+        console.error(
+          "[processSwapBatch] Missing direct from CPFP refund signature for first leaf",
+        );
+        throw new Error("Failed to get direct from CPFP refund signature");
+      }
+
+      const {
+        adaptorPrivateKey: cpfpAdaptorPrivateKey,
+        adaptorSignature: cpfpAdaptorSignature,
+      } = generateAdaptorFromSignature(cpfpRefundSignature);
+
+      let directAdaptorPrivateKey: Uint8Array = new Uint8Array();
+      let directAdaptorSignature: Uint8Array = new Uint8Array();
+      let directFromCpfpAdaptorPrivateKey: Uint8Array = new Uint8Array();
+      let directFromCpfpAdaptorSignature: Uint8Array = new Uint8Array();
+
+      if (directRefundSignature.length > 0) {
+        const { adaptorPrivateKey, adaptorSignature } =
+          generateAdaptorFromSignature(directRefundSignature);
+
+        directAdaptorPrivateKey = adaptorPrivateKey;
+        directAdaptorSignature = adaptorSignature;
+      }
+
+      if (directFromCpfpRefundSignature.length > 0) {
+        const { adaptorPrivateKey, adaptorSignature } =
+          generateAdaptorFromSignature(directFromCpfpRefundSignature);
+        directFromCpfpAdaptorPrivateKey = adaptorPrivateKey;
+        directFromCpfpAdaptorSignature = adaptorSignature;
+      }
 
       if (!transfer.leaves[0].leaf) {
+        console.error(
+          "[processSwapBatch] First leaf missing when preparing user leaves",
+        );
         throw new Error("Failed to get leaf");
       }
 
@@ -1075,42 +1138,128 @@ export class SparkWallet extends EventEmitter {
         raw_unsigned_refund_transaction: bytesToHex(
           transfer.leaves[0].intermediateRefundTx,
         ),
-        adaptor_added_signature: bytesToHex(adaptorSignature),
+        direct_raw_unsigned_refund_transaction: bytesToHex(
+          transfer.leaves[0].intermediateDirectRefundTx,
+        ),
+        direct_from_cpfp_raw_unsigned_refund_transaction: bytesToHex(
+          transfer.leaves[0].intermediateDirectFromCpfpRefundTx,
+        ),
+        adaptor_added_signature: bytesToHex(cpfpAdaptorSignature),
+        direct_adaptor_added_signature: bytesToHex(directAdaptorSignature),
+        direct_from_cpfp_adaptor_added_signature: bytesToHex(
+          directFromCpfpAdaptorSignature,
+        ),
       });
 
       for (let i = 1; i < transfer.leaves.length; i++) {
         const leaf = transfer.leaves[i];
         if (!leaf?.leaf) {
+          console.error(`[processSwapBatch] Leaf ${i + 1} is missing`);
           throw new Error("Failed to get leaf");
         }
 
-        const refundSignature = signatureMap.get(leaf.leaf.id);
-        if (!refundSignature) {
-          throw new Error("Failed to get refund signature");
+        const cpfpRefundSignature = signatureMap.get(leaf.leaf.id);
+        if (!cpfpRefundSignature) {
+          console.error(
+            `[processSwapBatch] Missing CPFP refund signature for leaf ${i + 1}`,
+          );
+          throw new Error("Failed to get CPFP refund signature");
         }
 
-        const signature = generateSignatureFromExistingAdaptor(
-          refundSignature,
-          adaptorPrivateKey,
+        const directRefundSignature = directSignatureMap.get(leaf.leaf.id);
+        if (!directRefundSignature) {
+          console.error(
+            `[processSwapBatch] Missing direct refund signature for leaf ${i + 1}`,
+          );
+          throw new Error("Failed to get direct refund signature");
+        }
+
+        const directFromCpfpRefundSignature = directFromCpfpSignatureMap.get(
+          leaf.leaf.id,
         );
+        if (!directFromCpfpRefundSignature) {
+          console.error(
+            `[processSwapBatch] Missing direct from CPFP refund signature for leaf ${i + 1}`,
+          );
+          throw new Error("Failed to get direct from CPFP refund signature");
+        }
+
+        const cpfpSignature = generateSignatureFromExistingAdaptor(
+          cpfpRefundSignature,
+          cpfpAdaptorPrivateKey,
+        );
+
+        let directSignature: Uint8Array = new Uint8Array();
+        if (directRefundSignature.length > 0) {
+          directSignature = generateSignatureFromExistingAdaptor(
+            directRefundSignature,
+            directAdaptorPrivateKey,
+          );
+        }
+
+        let directFromCpfpSignature: Uint8Array = new Uint8Array();
+        if (directFromCpfpRefundSignature.length > 0) {
+          directFromCpfpSignature = generateSignatureFromExistingAdaptor(
+            directFromCpfpRefundSignature,
+            directFromCpfpAdaptorPrivateKey,
+          );
+        }
 
         userLeaves.push({
           leaf_id: leaf.leaf.id,
           raw_unsigned_refund_transaction: bytesToHex(
             leaf.intermediateRefundTx,
           ),
-          adaptor_added_signature: bytesToHex(signature),
+          direct_raw_unsigned_refund_transaction: bytesToHex(
+            leaf.intermediateDirectRefundTx,
+          ),
+          direct_from_cpfp_raw_unsigned_refund_transaction: bytesToHex(
+            leaf.intermediateDirectFromCpfpRefundTx,
+          ),
+          adaptor_added_signature: bytesToHex(cpfpSignature),
+          direct_adaptor_added_signature: bytesToHex(directSignature),
+          direct_from_cpfp_adaptor_added_signature: bytesToHex(
+            directFromCpfpSignature,
+          ),
         });
       }
 
       const sspClient = this.getSspClient();
-      const adaptorPubkey = bytesToHex(
-        secp256k1.getPublicKey(adaptorPrivateKey),
+      const cpfpAdaptorPubkey = bytesToHex(
+        secp256k1.getPublicKey(cpfpAdaptorPrivateKey),
       );
+      if (!cpfpAdaptorPubkey) {
+        throw new Error("Failed to generate CPFP adaptor pubkey");
+      }
+
+      let directAdaptorPubkey: string | undefined;
+      if (directAdaptorPrivateKey.length > 0) {
+        directAdaptorPubkey = bytesToHex(
+          secp256k1.getPublicKey(directAdaptorPrivateKey),
+        );
+      }
+
+      let directFromCpfpAdaptorPubkey: string | undefined;
+      if (directFromCpfpAdaptorPrivateKey.length > 0) {
+        directFromCpfpAdaptorPubkey = bytesToHex(
+          secp256k1.getPublicKey(directFromCpfpAdaptorPrivateKey),
+        );
+      }
+
       let request: LeavesSwapRequest | null | undefined = null;
+      const targetAmountSats =
+        targetAmounts?.reduce((acc, amount) => acc + amount, 0) ||
+        leavesBatch.reduce((acc, leaf) => acc + leaf.value, 0);
+      const totalAmountSats = leavesBatch.reduce(
+        (acc, leaf) => acc + leaf.value,
+        0,
+      );
+
       request = await sspClient.requestLeaveSwap({
         userLeaves,
-        adaptorPubkey,
+        adaptorPubkey: cpfpAdaptorPubkey,
+        directAdaptorPubkey: directAdaptorPubkey,
+        directFromCpfpAdaptorPubkey: directFromCpfpAdaptorPubkey,
         targetAmountSats:
           targetAmounts?.reduce((acc, amount) => acc + amount, 0) ||
           leavesBatch.reduce((acc, leaf) => acc + leaf.value, 0),
@@ -1122,6 +1271,7 @@ export class SparkWallet extends EventEmitter {
       });
 
       if (!request) {
+        console.error("[processSwapBatch] Leave swap request returned null");
         throw new Error("Failed to request leaves swap. No response returned.");
       }
 
@@ -1137,53 +1287,133 @@ export class SparkWallet extends EventEmitter {
       });
 
       if (Object.values(nodes.nodes).length !== request.swapLeaves.length) {
+        console.error("[processSwapBatch] Node count mismatch:", {
+          actual: Object.values(nodes.nodes).length,
+          expected: request.swapLeaves.length,
+        });
         throw new Error("Expected same number of nodes as swapLeaves");
       }
 
       for (const [nodeId, node] of Object.entries(nodes.nodes)) {
         if (!node.nodeTx) {
+          console.error(`[processSwapBatch] Node tx missing for ${nodeId}`);
           throw new Error(`Node tx not found for leaf ${nodeId}`);
         }
 
         if (!node.verifyingPublicKey) {
+          console.error(
+            `[processSwapBatch] Verifying public key missing for ${nodeId}`,
+          );
           throw new Error(`Node public key not found for leaf ${nodeId}`);
         }
 
         const leaf = request.swapLeaves.find((leaf) => leaf.leafId === nodeId);
         if (!leaf) {
+          console.error(`[processSwapBatch] Leaf not found for node ${nodeId}`);
           throw new Error(`Leaf not found for node ${nodeId}`);
         }
-
-        const nodeTx = getTxFromRawTxBytes(node.nodeTx);
-        const refundTxBytes = hexToBytes(leaf.rawUnsignedRefundTransaction);
-        const refundTx = getTxFromRawTxBytes(refundTxBytes);
-        const sighash = getSigHashFromTx(refundTx, 0, nodeTx.getOutput(0));
+        // Apply CPFP adaptor signature
+        const cpfpNodeTx = getTxFromRawTxBytes(node.nodeTx);
+        const cpfpRefundTxBytes = hexToBytes(leaf.rawUnsignedRefundTransaction);
+        const cpfpRefundTx = getTxFromRawTxBytes(cpfpRefundTxBytes);
+        const cpfpSighash = getSigHashFromTx(
+          cpfpRefundTx,
+          0,
+          cpfpNodeTx.getOutput(0),
+        );
 
         const nodePublicKey = node.verifyingPublicKey;
-
         const taprootKey = computeTaprootKeyNoScript(nodePublicKey.slice(1));
-        const adaptorSignatureBytes = hexToBytes(leaf.adaptorSignedSignature);
+        const cpfpAdaptorSignatureBytes = hexToBytes(
+          leaf.adaptorSignedSignature,
+        );
         applyAdaptorToSignature(
           taprootKey.slice(1),
-          sighash,
-          adaptorSignatureBytes,
-          adaptorPrivateKey,
+          cpfpSighash,
+          cpfpAdaptorSignatureBytes,
+          cpfpAdaptorPrivateKey,
         );
-      }
 
+        // Apply direct adaptor signature
+
+        if (leaf.directRawUnsignedRefundTransaction) {
+          const directNodeTx = getTxFromRawTxBytes(node.directTx);
+          const directRefundTxBytes = hexToBytes(
+            leaf.directRawUnsignedRefundTransaction,
+          );
+          const directRefundTx = getTxFromRawTxBytes(directRefundTxBytes);
+          const directSighash = getSigHashFromTx(
+            directRefundTx,
+            0,
+            directNodeTx.getOutput(0),
+          );
+          if (!leaf.directAdaptorSignedSignature) {
+            throw new Error(
+              `Direct adaptor signed signature missing for node ${nodeId}`,
+            );
+          }
+          const directAdaptorSignatureBytes = hexToBytes(
+            leaf.directAdaptorSignedSignature,
+          );
+
+          applyAdaptorToSignature(
+            taprootKey.slice(1),
+            directSighash,
+            directAdaptorSignatureBytes,
+            directAdaptorPrivateKey,
+          );
+        }
+
+        if (leaf.directFromCpfpRawUnsignedRefundTransaction) {
+          const directFromCpfpRefundTxBytes = hexToBytes(
+            leaf.directFromCpfpRawUnsignedRefundTransaction,
+          );
+          const directFromCpfpRefundTx = getTxFromRawTxBytes(
+            directFromCpfpRefundTxBytes,
+          );
+          const directFromCpfpSighash = getSigHashFromTx(
+            directFromCpfpRefundTx,
+            0,
+            cpfpNodeTx.getOutput(0),
+          );
+          if (!leaf.directFromCpfpAdaptorSignedSignature) {
+            throw new Error(
+              `Direct adaptor signed signature missing for node ${nodeId}`,
+            );
+          }
+          const directFromCpfpAdaptorSignatureBytes = hexToBytes(
+            leaf.directFromCpfpAdaptorSignedSignature,
+          );
+          applyAdaptorToSignature(
+            taprootKey.slice(1),
+            directFromCpfpSighash,
+            directFromCpfpAdaptorSignatureBytes,
+            directFromCpfpAdaptorPrivateKey,
+          );
+        }
+      }
       await this.transferService.deliverTransferPackage(
         transfer,
         leafKeyTweaks,
         signatureMap,
+        directSignatureMap,
+        directFromCpfpSignatureMap,
       );
-
       const completeResponse = await sspClient.completeLeaveSwap({
-        adaptorSecretKey: bytesToHex(adaptorPrivateKey),
+        adaptorSecretKey: bytesToHex(cpfpAdaptorPrivateKey),
+        directAdaptorSecretKey: bytesToHex(directAdaptorPrivateKey),
+        directFromCpfpAdaptorSecretKey: bytesToHex(
+          directFromCpfpAdaptorPrivateKey,
+        ),
         userOutboundTransferExternalId: transfer.id,
         leavesSwapRequestId: request.id,
       });
 
       if (!completeResponse || !completeResponse.inboundTransfer?.sparkId) {
+        console.error(
+          "[processSwapBatch] Invalid complete response:",
+          completeResponse,
+        );
         throw new Error("Failed to complete leaves swap");
       }
 
@@ -1192,6 +1422,7 @@ export class SparkWallet extends EventEmitter {
       );
 
       if (!incomingTransfer) {
+        console.error("[processSwapBatch] No incoming transfer found");
         throw new Error("Failed to get incoming transfer");
       }
 
@@ -1202,38 +1433,14 @@ export class SparkWallet extends EventEmitter {
         optimize: false,
       });
     } catch (e) {
+      console.error("[processSwapBatch] Error details:", {
+        error: e,
+        message: (e as Error).message,
+        stack: (e as Error).stack,
+      });
       await this.cancelAllSenderInitiatedTransfers();
       throw new Error(`Failed to request leaves swap: ${e}`);
     }
-  }
-
-  /**
-   * Gets all transfers for the wallet.
-   *
-   * @param {number} [limit=20] - Maximum number of transfers to return
-   * @param {number} [offset=0] - Offset for pagination
-   * @returns {Promise<QueryTransfersResponse>} Response containing the list of transfers
-   */
-  public async getTransfers(
-    limit: number = 20,
-    offset: number = 0,
-  ): Promise<{
-    transfers: WalletTransfer[];
-    offset: number;
-  }> {
-    const transfers = await this.transferService.queryAllTransfers(
-      limit,
-      offset,
-    );
-    const identityPublicKey = bytesToHex(
-      await this.config.signer.getIdentityPublicKey(),
-    );
-    return {
-      transfers: transfers.transfers.map((transfer) =>
-        mapTransferToWalletTransfer(transfer, identityPublicKey),
-      ),
-      offset: transfers.offset,
-    };
   }
 
   /**
@@ -1454,7 +1661,9 @@ export class SparkWallet extends EventEmitter {
     }
 
     if (outputIndex === undefined) {
-      outputIndex = await this.getDepositTransactionVout(transactionId);
+      outputIndex = await this.getDepositTransactionVout({
+        txid: transactionId,
+      });
     }
 
     const quote = await sspClient.getClaimDepositQuote({
@@ -1495,7 +1704,9 @@ export class SparkWallet extends EventEmitter {
     }
 
     if (outputIndex === undefined) {
-      outputIndex = await this.getDepositTransactionVout(transactionId);
+      outputIndex = await this.getDepositTransactionVout({
+        txid: transactionId,
+      });
     }
 
     let network = this.config.getSspNetwork();
@@ -1541,12 +1752,85 @@ export class SparkWallet extends EventEmitter {
   }
 
   /**
+   * Get a quote on how much credit you can claim for a deposit from the SSP. If the quote charges less fees than the max fee, claim the deposit.
+   *
+   * @param {Object} params - The parameters object
+   * @param {string} params.transactionId - The ID of the transaction
+   * @param {number} params.maxFee - The maximum fee to claim the deposit for
+   * @param {number} [params.outputIndex] - The index of the output
+   * @returns {Promise<StaticDepositQuoteOutput>} Quote for claiming a deposit to a static deposit address
+   */
+  public async claimStaticDepositWithMaxFee({
+    transactionId,
+    maxFee,
+    outputIndex,
+  }: {
+    transactionId: string;
+    maxFee: number;
+    outputIndex?: number;
+  }): Promise<ClaimStaticDepositOutput | null> {
+    const sspClient = this.getSspClient();
+    let network = this.config.getSspNetwork();
+
+    if (network === BitcoinNetwork.FUTURE_VALUE) {
+      network = BitcoinNetwork.REGTEST;
+    }
+
+    const depositTx = await this.getDepositTransaction(transactionId);
+
+    if (outputIndex === undefined) {
+      outputIndex = await this.getDepositTransactionVout({
+        txid: transactionId,
+        depositTx,
+      });
+    }
+
+    const depositAmount = Number(depositTx.getOutput(outputIndex).amount);
+
+    const quote = await sspClient.getClaimDepositQuote({
+      transactionId,
+      outputIndex,
+      network,
+    });
+
+    if (!quote) {
+      throw new Error("Failed to get claim deposit quote");
+    }
+
+    const { creditAmountSats, signature: sspSignature } = quote;
+
+    const feeCharged = depositAmount - creditAmountSats;
+
+    if (feeCharged > maxFee) {
+      throw new ValidationError("Fee larger than max fee", {
+        field: "feeCharged",
+        value: feeCharged,
+      });
+    }
+
+    const response = await this.claimStaticDeposit({
+      transactionId,
+      creditAmountSats,
+      sspSignature,
+      outputIndex,
+    });
+
+    if (!response) {
+      throw new Error("Failed to claim static deposit");
+    }
+
+    return response;
+  }
+
+  /**
    * Refunds a static deposit to a destination address.
    *
-   * @param {string} depositTransactionId - The ID of the transaction
-   * @param {number} [outputIndex] - The index of the output
-   * @param {string} destinationAddress - The destination address
-   * @param {number} fee - The fee to refund
+   * @param {Object} params - The refund parameters
+   * @param {string} params.depositTransactionId - The ID of the transaction
+   * @param {number} [params.outputIndex] - The index of the output
+   * @param {string} params.destinationAddress - The destination address
+   * @param {number} [params.fee] - **@deprecated** The fee to refund
+   * @param {number} [params.satsPerVbyteFee] - The fee per vbyte to refund
    * @returns {Promise<string>} The hex of the refund transaction
    */
   public async refundStaticDeposit({
@@ -1554,16 +1838,31 @@ export class SparkWallet extends EventEmitter {
     outputIndex,
     destinationAddress,
     fee,
+    satsPerVbyteFee,
   }: {
     depositTransactionId: string;
     outputIndex?: number;
     destinationAddress: string;
-    fee: number;
+    /** @deprecated use `satsPerVbyteFee` */ fee?: number;
+    satsPerVbyteFee?: number;
   }): Promise<string> {
-    if (fee <= 300) {
-      throw new ValidationError("Fee must be greater than 300", {
+    if (fee === undefined && satsPerVbyteFee === undefined) {
+      throw new ValidationError("Fee or satsPerVbyteFee must be provided");
+    }
+
+    // Users can set this to 300 or higher due to our old flow so they may be trained to type in 300 or higher which would make the fee way too high.
+    if (satsPerVbyteFee && satsPerVbyteFee > 150) {
+      throw new ValidationError("satsPerVbyteFee must be less than 150");
+    }
+
+    const finalFee = satsPerVbyteFee
+      ? satsPerVbyteFee * getTxEstimatedVbytesSizeByNumberOfInputsOutputs(1, 1)
+      : fee!;
+
+    if (finalFee < 194) {
+      throw new ValidationError("Fee must be at least 194", {
         field: "fee",
-        value: fee,
+        value: finalFee,
       });
     }
 
@@ -1574,11 +1873,14 @@ export class SparkWallet extends EventEmitter {
     const depositTx = await this.getDepositTransaction(depositTransactionId);
 
     if (outputIndex === undefined) {
-      outputIndex = await this.getDepositTransactionVout(depositTransactionId);
+      outputIndex = await this.getDepositTransactionVout({
+        txid: depositTransactionId,
+        depositTx,
+      });
     }
 
     const totalAmount = depositTx.getOutput(outputIndex).amount;
-    const creditAmountSats = Number(totalAmount) - fee;
+    const creditAmountSats = Number(totalAmount) - finalFee;
 
     if (creditAmountSats <= 0) {
       throw new ValidationError(
@@ -1642,29 +1944,15 @@ export class SparkWallet extends EventEmitter {
       this.config.getCoordinatorAddress(),
     );
 
-    const transferId = uuidv7();
-
     // Initiate Utxo Swap
-    const swapResponse = await sparkClient.initiate_utxo_swap({
+    const swapResponse = await sparkClient.initiate_static_deposit_utxo_refund({
       onChainUtxo: {
         txid: hexToBytes(depositTransactionId),
         vout: outputIndex,
         network: networkType,
       },
-      requestType: UtxoSwapRequestType.Refund,
-      amount: {
-        creditAmountSats: 0,
-        $case: "creditAmountSats",
-      },
       userSignature: swapResponseUserSignature,
-      sspSignature: new Uint8Array(),
-      transfer: {
-        transferId: transferId,
-        ownerIdentityPublicKey: await this.config.signer.getIdentityPublicKey(),
-        receiverIdentityPublicKey:
-          await this.config.signer.getIdentityPublicKey(),
-      },
-      spendTxSigningJob: signingJob,
+      refundTxSigningJob: signingJob,
     });
 
     if (!swapResponse) {
@@ -1681,17 +1969,17 @@ export class SparkWallet extends EventEmitter {
       },
       selfCommitment: signingNonceCommitment,
       statechainCommitments:
-        swapResponse.spendTxSigningResult!.signingNonceCommitments,
+        swapResponse.refundTxSigningResult!.signingNonceCommitments,
       verifyingKey: swapResponse.depositAddress!.verifyingPublicKey,
     });
 
     const signatureResult = await this.config.signer.aggregateFrost({
       message: spendTxSighash,
-      statechainSignatures: swapResponse.spendTxSigningResult!.signatureShares,
-      statechainPublicKeys: swapResponse.spendTxSigningResult!.publicKeys,
+      statechainSignatures: swapResponse.refundTxSigningResult!.signatureShares,
+      statechainPublicKeys: swapResponse.refundTxSigningResult!.publicKeys,
       verifyingKey: swapResponse.depositAddress!.verifyingPublicKey,
       statechainCommitments:
-        swapResponse.spendTxSigningResult!.signingNonceCommitments,
+        swapResponse.refundTxSigningResult!.signingNonceCommitments,
       selfCommitment: signingNonceCommitment,
       publicKey: await this.config.signer.getStaticDepositSigningKey(0),
       selfSignature: userSignature,
@@ -1777,8 +2065,16 @@ export class SparkWallet extends EventEmitter {
     return payload;
   }
 
-  private async getDepositTransactionVout(txid: string): Promise<number> {
-    const depositTx = await this.getDepositTransaction(txid);
+  private async getDepositTransactionVout({
+    txid,
+    depositTx,
+  }: {
+    txid: string;
+    depositTx?: Transaction;
+  }): Promise<number> {
+    if (!depositTx) {
+      depositTx = await this.getDepositTransaction(txid);
+    }
 
     const staticDepositAddresses = new Set(
       await this.queryStaticDepositAddresses(),
@@ -2299,10 +2595,16 @@ export class SparkWallet extends EventEmitter {
 
     for (const node of nodes) {
       const nodeTx = getTxFromRawTxBytes(node.nodeTx);
-      const { needRefresh } = getNextTransactionSequence(
-        nodeTx.getInput(0).sequence,
-      );
-      if (needRefresh) {
+      const sequence = nodeTx.getInput(0).sequence;
+      if (!sequence) {
+        throw new ValidationError("Invalid node transaction", {
+          field: "sequence",
+          value: nodeTx.getInput(0),
+          expected: "Non-null sequence",
+        });
+      }
+      const needsRefresh = doesLeafNeedRefresh(sequence, true);
+      if (needsRefresh) {
         nodesToExtend.push(node);
         nodeIds.push(node.id);
       } else {
@@ -2347,11 +2649,16 @@ export class SparkWallet extends EventEmitter {
 
     for (const node of nodes) {
       const refundTx = getTxFromRawTxBytes(node.refundTx);
-      const { needRefresh } = getNextTransactionSequence(
-        refundTx.getInput(0).sequence,
-        true,
-      );
-      if (needRefresh) {
+      const sequence = refundTx.getInput(0).sequence;
+      if (!sequence) {
+        throw new ValidationError("Invalid refund transaction", {
+          field: "sequence",
+          value: refundTx.getInput(0),
+          expected: "Non-null sequence",
+        });
+      }
+      const needsRefresh = doesLeafNeedRefresh(sequence);
+      if (needsRefresh) {
         nodesToRefresh.push(node);
         nodeIds.push(node.id);
       } else {
@@ -2391,7 +2698,7 @@ export class SparkWallet extends EventEmitter {
       }
 
       const { nodes } = await this.transferService.refreshTimelockNodes(
-        [node],
+        node,
         parentNode,
       );
 
@@ -2456,6 +2763,9 @@ export class SparkWallet extends EventEmitter {
                 leaf: {
                   ...leaf.leaf,
                   refundTx: leaf.intermediateRefundTx,
+                  directRefundTx: leaf.intermediateDirectRefundTx,
+                  directFromCpfpRefundTx:
+                    leaf.intermediateDirectFromCpfpRefundTx,
                 },
                 keyDerivation: {
                   type: KeyDerivationType.ECIES,
@@ -2551,7 +2861,9 @@ export class SparkWallet extends EventEmitter {
         transfer.status !==
           TransferStatus.TRANSFER_STATUS_RECEIVER_REFUND_SIGNED &&
         transfer.status !==
-          TransferStatus.TRANSFER_STATUS_RECEIVER_KEY_TWEAK_APPLIED
+          TransferStatus.TRANSFER_STATUS_RECEIVER_KEY_TWEAK_APPLIED &&
+        transfer.status !==
+          TransferStatus.TRANSFER_STATUS_RECEIVER_KEY_TWEAK_LOCKED
       ) {
         continue;
       }
@@ -2735,7 +3047,7 @@ export class SparkWallet extends EventEmitter {
       return invoice;
     };
 
-    const invoice = await this.lightningService!.createLightningInvoice({
+    const invoice = await this.lightningService.createLightningInvoice({
       amountSats,
       memo,
       invoiceCreator: requestLightningInvoice,
@@ -2763,7 +3075,13 @@ export class SparkWallet extends EventEmitter {
   }: PayLightningInvoiceParams) {
     const invoiceNetwork = getNetworkFromInvoice(invoice);
     const walletNetwork = this.config.getNetwork();
-    if (invoiceNetwork !== walletNetwork) {
+
+    const isValidNetworkForWallet =
+      invoiceNetwork === walletNetwork ||
+      (invoiceNetwork === Network.REGTEST &&
+        (walletNetwork === Network.REGTEST || walletNetwork === Network.LOCAL));
+
+    if (!isValidNetworkForWallet) {
       throw new ValidationError(
         `Invoice network: ${invoiceNetwork} does not match wallet network: ${walletNetwork}`,
         {
@@ -2904,6 +3222,8 @@ export class SparkWallet extends EventEmitter {
       await this.transferService.deliverTransferPackage(
         swapResponse.transfer,
         leavesToSend,
+        new Map(),
+        new Map(),
         new Map(),
       );
 
@@ -3260,13 +3580,54 @@ export class SparkWallet extends EventEmitter {
    * Gets a transfer that has been sent by the SSP to the wallet.
    *
    * @param {string} id - The ID of the transfer
-   * @returns {Promise<GraphQLTransferObj | null>} The transfer
+   * @returns {Promise<TransferWithUserRequest | undefined>} The transfer
    */
   public async getTransferFromSsp(
     id: string,
-  ): Promise<GraphQLTransferObj | null> {
+  ): Promise<TransferWithUserRequest | undefined> {
     const sspClient = this.getSspClient();
-    return await sspClient.getTransfer(id);
+    const transfers = await sspClient.getTransfers([id]);
+    return transfers?.[0];
+  }
+
+  private async constructTransfersWithUserRequest(
+    transfers: Transfer[],
+  ): Promise<WalletTransfer[]> {
+    const identityPublicKey = bytesToHex(
+      await this.config.signer.getIdentityPublicKey(),
+    );
+
+    const userRequests = await this.sspClient?.getTransfers(
+      transfers
+        .filter((transfer) =>
+          [
+            TransferType.COOPERATIVE_EXIT,
+            TransferType.COUNTER_SWAP,
+            TransferType.PREIMAGE_SWAP,
+            TransferType.SWAP,
+            TransferType.UTXO_SWAP,
+          ].includes(transfer.type),
+        )
+        .map((transfer) => transfer.id),
+    );
+
+    const userRequestsMap = new Map<
+      string,
+      Omit<UserRequestType, "transfer">
+    >();
+    for (const userRequest of userRequests || []) {
+      if (userRequest && userRequest.sparkId && userRequest.userRequest) {
+        userRequestsMap.set(userRequest.sparkId, userRequest.userRequest);
+      }
+    }
+
+    return transfers.map((transfer) =>
+      mapTransferToWalletTransfer(
+        transfer,
+        identityPublicKey,
+        userRequestsMap.get(transfer.id),
+      ),
+    );
   }
 
   /**
@@ -3282,10 +3643,35 @@ export class SparkWallet extends EventEmitter {
     if (!transfer) {
       return undefined;
     }
-    return mapTransferToWalletTransfer(
-      transfer,
-      bytesToHex(await this.config.signer.getIdentityPublicKey()),
+
+    return (await this.constructTransfersWithUserRequest([transfer]))[0];
+  }
+
+  /**
+   * Gets all transfers for the wallet.
+   *
+   * @param {number} [limit=20] - Maximum number of transfers to return
+   * @param {number} [offset=0] - Offset for pagination
+   * @returns {Promise<QueryTransfersResponse>} Response containing the list of transfers
+   */
+  public async getTransfers(
+    limit: number = 20,
+    offset: number = 0,
+  ): Promise<{
+    transfers: WalletTransfer[];
+    offset: number;
+  }> {
+    const transfers = await this.transferService.queryAllTransfers(
+      limit,
+      offset,
     );
+
+    return {
+      transfers: await this.constructTransfersWithUserRequest(
+        transfers.transfers,
+      ),
+      offset: transfers.offset,
+    };
   }
 
   // ***** Token Flow *****
@@ -3453,8 +3839,8 @@ export class SparkWallet extends EventEmitter {
     tokenTransactionHashes,
     tokenIdentifiers,
     outputIds,
-    pageSize = 100,
-    offset = 0,
+    pageSize,
+    offset,
   }: {
     ownerPublicKeys?: string[];
     issuerPublicKeys?: string[];
@@ -3470,8 +3856,8 @@ export class SparkWallet extends EventEmitter {
       tokenTransactionHashes,
       tokenIdentifiers,
       outputIds,
-      pageSize,
-      offset,
+      pageSize: pageSize ?? 100,
+      offset: offset ?? 0,
     }) as Promise<TokenTransactionWithStatus[]>;
   }
 
@@ -3868,101 +4254,75 @@ export class SparkWallet extends EventEmitter {
         includeParents: true,
       });
 
-      const node = response.nodes[nodeId];
-      if (!node) {
+      let leaf = response.nodes[nodeId];
+      if (!leaf) {
         throw new ValidationError("Node not found", {
           field: "nodeId",
           value: nodeId,
         });
       }
 
-      if (!node.parentNodeId) {
-        throw new ValidationError("Node has no parent", {
-          field: "parentNodeId",
-          value: node.parentNodeId,
-        });
+      let parentNode;
+      let hasParentNode = false;
+      if (!leaf.parentNodeId) {
+        // skip node timelock check
+      } else {
+        hasParentNode = true;
+        parentNode = response.nodes[leaf.parentNodeId];
+        if (!parentNode) {
+          throw new ValidationError("Parent node not found", {
+            field: "parentNodeId",
+            value: leaf.parentNodeId,
+          });
+        }
       }
 
-      const parentNode = response.nodes[node.parentNodeId];
-      if (!parentNode) {
-        throw new ValidationError("Parent node not found", {
-          field: "parentNodeId",
-          value: node.parentNodeId,
-        });
-      }
+      const nodeTx = getTxFromRawTxBytes(leaf.nodeTx);
+      const refundTx = getTxFromRawTxBytes(leaf.refundTx);
 
-      // Call the transfer service to refresh the timelock
-      const result = await this.transferService.refreshTimelockNodes(
-        [node],
-        parentNode,
-      );
+      if (hasParentNode) {
+        const nodeTimelock = getCurrentTimelock(nodeTx.getInput(0).sequence);
+        if (nodeTimelock > 100) {
+          const expiredNodeTxLeaf =
+            await this.transferService.testonly_expireTimeLockNodeTx(
+              leaf,
+              parentNode,
+            );
+
+          if (!expiredNodeTxLeaf.nodes[0]) {
+            throw new ValidationError("No expired node tx leaf", {
+              field: "expiredNodeTxLeaf",
+              value: expiredNodeTxLeaf,
+            });
+          }
+          leaf = expiredNodeTxLeaf.nodes[0];
+        }
+      }
+      const refundTimelock = getCurrentTimelock(refundTx.getInput(0).sequence);
+
+      if (refundTimelock > 100) {
+        const expiredTxLeaf =
+          await this.transferService.testonly_expireTimeLockRefundtx(leaf);
+
+        if (!expiredTxLeaf.nodes[0]) {
+          throw new ValidationError("No expired tx leaf", {
+            field: "expiredTxLeaf",
+            value: expiredTxLeaf,
+          });
+        }
+        leaf = expiredTxLeaf.nodes[0];
+      }
 
       // Update the local leaves if this node is in our wallet
-      const leafIndex = this.leaves.findIndex((leaf) => leaf.id === node.id);
-      if (leafIndex !== -1 && result.nodes.length > 0) {
-        const newNode = result.nodes[0];
-        if (newNode) {
-          this.leaves[leafIndex] = newNode;
-        }
+      const leafIndex = this.leaves.findIndex((leaf) => leaf.id === leaf.id);
+      if (leafIndex !== -1) {
+        this.leaves[leafIndex] = leaf;
       }
     } catch (error) {
       throw new NetworkError(
         "Failed to refresh timelock",
         {
           method: "refresh_timelock",
-        },
-        error as Error,
-      );
-    }
-  }
-
-  /**
-   * Refresh the timelock of a specific node's refund transaction only.
-   *
-   * @param {string} nodeId - The ID of the node whose refund transaction to refresh
-   * @returns {Promise<void>} Promise that resolves when the refund timelock is refreshed
-   */
-  public async testOnly_expireTimelockRefundTx(nodeId: string): Promise<void> {
-    const sparkClient = await this.connectionManager.createSparkClient(
-      this.config.getCoordinatorAddress(),
-    );
-
-    try {
-      // Get the node
-      const response = await sparkClient.query_nodes({
-        source: {
-          $case: "nodeIds",
-          nodeIds: {
-            nodeIds: [nodeId],
-          },
-        },
-        includeParents: false,
-      });
-
-      const node = response.nodes[nodeId];
-      if (!node) {
-        throw new ValidationError("Node not found", {
-          field: "nodeId",
-          value: nodeId,
-        });
-      }
-
-      // Call the transfer service to refresh the refund timelock
-      const result = await this.transferService.refreshTimelockRefundTx(node);
-
-      // Update the local leaves if this node is in our wallet
-      const leafIndex = this.leaves.findIndex((leaf) => leaf.id === node.id);
-      if (leafIndex !== -1 && result.nodes.length > 0) {
-        const newNode = result.nodes[0];
-        if (newNode) {
-          this.leaves[leafIndex] = newNode;
-        }
-      }
-    } catch (error) {
-      throw new NetworkError(
-        "Failed to refresh refund timelock",
-        {
-          method: "refresh_timelock_refund_tx",
         },
         error as Error,
       );
@@ -4046,5 +4406,134 @@ export class SparkWallet extends EventEmitter {
 
       offset += pageSize;
     }
+  }
+
+  protected getOtelTraceUrls() {
+    const soConfig = this.config.getSigningOperators();
+    const sspBaseUrl = this.config.getSspBaseUrl();
+    const domains: string[] = [];
+    Object.values(soConfig).forEach((so) => {
+      domains.push(so.address);
+    });
+    if (sspBaseUrl) {
+      domains.push(sspBaseUrl);
+    }
+    return domains;
+  }
+
+  protected initializeTracer(wallet: SparkWallet) {
+    const consoleOptions = wallet.config.getConsoleOptions();
+    const spanProcessors: SpanProcessor[] = [];
+    if (consoleOptions.otel) {
+      console.log("OpenTelemetry client logging enabled.");
+      spanProcessors.push(new SimpleSpanProcessor(new ConsoleSpanExporter()));
+    }
+    const traceUrls = this.getOtelTraceUrls();
+    wallet.initializeTracerEnv({ spanProcessors, traceUrls });
+  }
+
+  protected initializeTracerEnv({
+    spanProcessors,
+    traceUrls,
+  }: {
+    spanProcessors: SpanProcessor[];
+    traceUrls: string[];
+  }) {
+    /* This needs to be implemented differently depending on platform due to
+       incompatible dependencies in both */
+  }
+
+  protected wrapWithOtelSpan<A extends unknown[], R>(
+    name: string,
+    fn: (...args: A) => Promise<R>,
+  ) {
+    return async (...args: A) => {
+      if (!this.tracer) {
+        throw new Error("Tracer not initialized");
+      }
+
+      return await this.tracer.startActiveSpan(name, async (span) => {
+        const traceId = span.spanContext().traceId;
+        try {
+          const result = await fn(...args);
+          return result;
+        } catch (error) {
+          if (error instanceof Error) {
+            error.message += ` [traceId: ${traceId}]`;
+          } else if (isObject(error)) {
+            error["traceId"] = traceId;
+          }
+          throw error;
+        } finally {
+          span.end();
+        }
+      });
+    };
+  }
+
+  protected getTraceName(methodName: string) {
+    return `SparkWallet.${methodName}`;
+  }
+
+  private wrapPublicSparkWalletMethodWithOtelSpan<M extends keyof SparkWallet>(
+    methodName: M,
+  ) {
+    const original = this[methodName];
+
+    if (typeof original !== "function") {
+      throw new Error(`Method ${methodName} is not a function on SparkWallet.`);
+    }
+
+    const wrapped = this.wrapWithOtelSpan(
+      this.getTraceName(methodName),
+      original.bind(this) as (...args: unknown[]) => Promise<unknown>,
+    ) as SparkWallet[M];
+
+    (this as SparkWallet)[methodName] = wrapped;
+  }
+
+  private wrapSparkWalletMethodsWithTracing() {
+    const methods = [
+      "getLeaves",
+      "getIdentityPublicKey",
+      "getSparkAddress",
+      "createSparkPaymentIntent",
+      "getSwapFeeEstimate",
+      "getTransfers",
+      "getBalance",
+      "getSingleUseDepositAddress",
+      "getStaticDepositAddress",
+      "queryStaticDepositAddresses",
+      "getClaimStaticDepositQuote",
+      "claimStaticDeposit",
+      "refundStaticDeposit",
+      "getUnusedDepositAddresses",
+      "claimDeposit",
+      "advancedDeposit",
+      "transfer",
+      "createLightningInvoice",
+      "payLightningInvoice",
+      "getLightningSendFeeEstimate",
+      "withdraw",
+      "getWithdrawalFeeQuote",
+      "getTransferFromSsp",
+      "getTransfer",
+      "transferTokens",
+      "batchTransferTokens",
+      "queryTokenTransactions",
+      "getLightningReceiveRequest",
+      "getLightningSendRequest",
+      "getCoopExitRequest",
+      "checkTimelock",
+      "testOnly_expireTimelock",
+    ] as const;
+
+    methods.forEach((m) => this.wrapPublicSparkWalletMethodWithOtelSpan(m));
+
+    /* Private methods can't be indexed on `this` and need to be wrapped individually: */
+    this.initWallet = this.wrapWithOtelSpan(
+      this.getTraceName("initWallet"),
+      this.initWallet.bind(this),
+    );
   }
 }

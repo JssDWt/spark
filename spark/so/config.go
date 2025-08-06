@@ -13,6 +13,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/lightsparkdev/spark/common/keys"
+
 	"github.com/XSAM/otelsql"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
@@ -48,7 +50,7 @@ type Config struct {
 	// Used as shamir secret share identifier in DKG key shares.
 	Identifier string
 	// IdentityPrivateKey is the identity private key of the signing operator.
-	IdentityPrivateKey []byte
+	IdentityPrivateKey keys.Private
 	// SigningOperatorMap is the map of signing operators.
 	SigningOperatorMap map[string]*SigningOperator
 	// Threshold is the threshold for the signing operator.
@@ -59,10 +61,8 @@ type Config struct {
 	DatabasePath string
 	// IsRDS indicates if the database is an RDS instance.
 	IsRDS bool
-	// authzEnforced determines if client authorization checks are enforced
-	authzEnforced bool
-	// DKGCoordinatorAddress is the address of the DKG coordinator.
-	DKGCoordinatorAddress string
+	// AuthzEnforced determines if client authorization checks are enforced
+	AuthzEnforced bool
 	// DKGConfig
 	DKGConfig DkgConfig
 	// SupportedNetworks is the list of networks supported by the signing operator.
@@ -89,7 +89,7 @@ type Config struct {
 	// Database is the configuration for the database.
 	Database DatabaseConfig
 	// identityPubkeyToOperatorIdentifierMap maps the signing operator identity pubkeys to its corresponding identifier.
-	identityPubkeyToOperatorIdentifierMap map[string]string
+	identityPubkeyToOperatorIdentifierMap map[keys.Public]string
 	// Token is the configuration for token-related settings.
 	Token TokenConfig
 	// ServiceAuthz specifies the enforcement of authorization checks for
@@ -125,6 +125,8 @@ type TokenConfig struct {
 	EnableBackfillTokenOutputTask bool `yaml:"enable_backfill_token_output_task"`
 	// EnableBackfillTokenFreezesTokenIdentifierTask enables the backfill token freezes token_identifier task.
 	EnableBackfillTokenFreezesTokenIdentifierTask bool `yaml:"enable_backfill_token_freezes_token_identifier_task"`
+	// EnableDeleteLegacyTokenOutputDataTask enables the delete legacy token output data task.
+	EnableDeleteLegacyTokenOutputDataTask bool `yaml:"enable_delete_legacy_token_output_data_task"`
 }
 
 // OperatorConfig contains the configuration for a signing operator.
@@ -238,7 +240,6 @@ func NewConfig(
 	databasePath string,
 	isRDS bool,
 	authzEnforced bool,
-	dkgCoordinatorAddress string,
 	supportedNetworks []common.Network,
 	serverCertPath string,
 	serverKeyPath string,
@@ -253,15 +254,14 @@ func NewConfig(
 	if err != nil {
 		return nil, err
 	}
-
-	signingOperatorMap, err := LoadOperators(operatorsFilePath)
+	identityPrivateKey, err := keys.ParsePrivateKey(identityPrivateKeyBytes)
 	if err != nil {
 		return nil, err
 	}
 
-	identityPubkeyToOperatorIdentifierMap := make(map[string]string)
-	for _, operator := range signingOperatorMap {
-		identityPubkeyToOperatorIdentifierMap[string(operator.IdentityPublicKey)] = operator.Identifier
+	signingOperatorMap, err := LoadOperators(operatorsFilePath)
+	if err != nil {
+		return nil, err
 	}
 
 	data, err := os.ReadFile(configFilePath)
@@ -280,10 +280,6 @@ func NewConfig(
 		return nil, fmt.Errorf("invalid index: %d exceeds %d", index, math.MaxUint32)
 	}
 	identifier := utils.IndexToIdentifier(uint32(index))
-
-	if dkgCoordinatorAddress == "" {
-		dkgCoordinatorAddress = signingOperatorMap[identifier].Address
-	}
 
 	if !operatorConfig.ServiceAuthz.Mode.Valid() {
 		slog.Warn("unset or invalid authz mode - treating authz as disabled", "mode", operatorConfig.ServiceAuthz.Mode)
@@ -308,34 +304,35 @@ func NewConfig(
 		operatorConfig.XffClientIpPosition = 0
 	}
 
-	return &Config{
-		Index:                                 index,
-		Identifier:                            identifier,
-		IdentityPrivateKey:                    identityPrivateKeyBytes,
-		SigningOperatorMap:                    signingOperatorMap,
-		Threshold:                             threshold,
-		SignerAddress:                         signerAddress,
-		DatabasePath:                          databasePath,
-		IsRDS:                                 isRDS,
-		authzEnforced:                         authzEnforced,
-		DKGCoordinatorAddress:                 dkgCoordinatorAddress,
-		DKGConfig:                             operatorConfig.Dkg,
-		SupportedNetworks:                     supportedNetworks,
-		BitcoindConfigs:                       operatorConfig.Bitcoind,
-		Lrc20Configs:                          operatorConfig.Lrc20,
-		ServerCertPath:                        serverCertPath,
-		ServerKeyPath:                         serverKeyPath,
-		RunDirectory:                          runDirectory,
-		ReturnDetailedErrors:                  operatorConfig.ReturnDetailedErrors,
-		ReturnDetailedPanicErrors:             operatorConfig.ReturnDetailedPanicErrors,
-		RateLimiter:                           rateLimiter,
-		Tracing:                               operatorConfig.Tracing,
-		Database:                              operatorConfig.Database,
-		identityPubkeyToOperatorIdentifierMap: identityPubkeyToOperatorIdentifierMap,
-		Token:                                 operatorConfig.Token,
-		ServiceAuthz:                          operatorConfig.ServiceAuthz,
-		XffClientIpPosition:                   operatorConfig.XffClientIpPosition,
-	}, nil
+	conf := &Config{
+		Index:                     index,
+		Identifier:                identifier,
+		IdentityPrivateKey:        identityPrivateKey,
+		SigningOperatorMap:        signingOperatorMap,
+		Threshold:                 threshold,
+		SignerAddress:             signerAddress,
+		DatabasePath:              databasePath,
+		IsRDS:                     isRDS,
+		AuthzEnforced:             authzEnforced,
+		DKGConfig:                 operatorConfig.Dkg,
+		SupportedNetworks:         supportedNetworks,
+		BitcoindConfigs:           operatorConfig.Bitcoind,
+		Lrc20Configs:              operatorConfig.Lrc20,
+		ServerCertPath:            serverCertPath,
+		ServerKeyPath:             serverKeyPath,
+		RunDirectory:              runDirectory,
+		ReturnDetailedErrors:      operatorConfig.ReturnDetailedErrors,
+		ReturnDetailedPanicErrors: operatorConfig.ReturnDetailedPanicErrors,
+		RateLimiter:               rateLimiter,
+		Tracing:                   operatorConfig.Tracing,
+		Database:                  operatorConfig.Database,
+		Token:                     operatorConfig.Token,
+		ServiceAuthz:              operatorConfig.ServiceAuthz,
+		XffClientIpPosition:       operatorConfig.XffClientIpPosition,
+	}
+
+	conf.buildIdentityPubkeyMap()
+	return conf, nil
 }
 
 func (c *Config) IsNetworkSupported(network common.Network) bool {
@@ -548,16 +545,26 @@ func (c *Config) GetSigningOperatorList() map[string]*pb.SigningOperatorInfo {
 	return operatorList
 }
 
-func (c *Config) GetOperatorIdentifierFromIdentityPublicKey(identityPublicKey []byte) string {
-	return c.identityPubkeyToOperatorIdentifierMap[string(identityPublicKey)]
+func (c *Config) buildIdentityPubkeyMap() {
+	c.identityPubkeyToOperatorIdentifierMap = make(map[keys.Public]string, len(c.SigningOperatorMap))
+	for _, operator := range c.SigningOperatorMap {
+		c.identityPubkeyToOperatorIdentifierMap[operator.IdentityPublicKey] = operator.Identifier
+	}
 }
 
-// AuthzEnforced returns whether authorization is enforced
-func (c *Config) AuthzEnforced() bool {
-	return c.authzEnforced
+func (c *Config) GetOperatorIdentifierFromIdentityPublicKey(identityPublicKey keys.Public) string {
+	if len(c.identityPubkeyToOperatorIdentifierMap) == 0 {
+		c.buildIdentityPubkeyMap()
+	}
+	return c.identityPubkeyToOperatorIdentifierMap[identityPublicKey]
 }
 
-func (c *Config) IdentityPublicKey() []byte {
+// IsAuthzEnforced returns whether authorization is enforced
+func (c *Config) IsAuthzEnforced() bool {
+	return c.AuthzEnforced
+}
+
+func (c *Config) IdentityPublicKey() keys.Public {
 	return c.SigningOperatorMap[c.Identifier].IdentityPublicKey
 }
 

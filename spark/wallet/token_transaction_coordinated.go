@@ -1,12 +1,13 @@
 package wallet
 
 import (
-	"bytes"
 	"context"
 	"encoding/hex"
 	"fmt"
 	"log"
 	"time"
+
+	"github.com/lightsparkdev/spark/common/keys"
 
 	"github.com/decred/dcrd/dcrec/secp256k1/v4"
 	"github.com/lightsparkdev/spark/common"
@@ -17,7 +18,6 @@ import (
 	"github.com/lightsparkdev/spark/so/ent"
 	"github.com/lightsparkdev/spark/so/ent/tokenoutput"
 	"github.com/lightsparkdev/spark/so/ent/tokentransaction"
-	"github.com/lightsparkdev/spark/so/helper"
 	"github.com/lightsparkdev/spark/so/utils"
 	"google.golang.org/grpc"
 )
@@ -52,7 +52,7 @@ func StartTokenTransactionCoordinated(
 	// Attach operator public keys to the transaction
 	var operatorKeys [][]byte
 	for _, operator := range config.SigningOperators {
-		operatorKeys = append(operatorKeys, operator.IdentityPublicKey)
+		operatorKeys = append(operatorKeys, operator.IdentityPublicKey.Serialize())
 	}
 	tokenTransaction.SparkOperatorIdentityPublicKeys = operatorKeys
 
@@ -77,13 +77,13 @@ func StartTokenTransactionCoordinated(
 			return nil, nil, fmt.Errorf("failed to infer token transaction type: %w", err)
 		}
 		if txType == utils.TokenTransactionTypeCreate || txType == utils.TokenTransactionTypeMint {
-			ownerPrivateKeys = []*secp256k1.PrivateKey{&config.IdentityPrivateKey}
+			ownerPrivateKeys = []*secp256k1.PrivateKey{config.IdentityPrivateKey.ToBTCEC()}
 		} else {
 			return nil, nil, fmt.Errorf("owner signing keys must be specified for transfer transaction")
 		}
 	}
 	for i, privKey := range ownerPrivateKeys {
-		sig, err := SignHashSlice(config, privKey, partialTokenTransactionHash)
+		sig, err := SignHashSlice(config, keys.PrivateFromKey(*privKey), partialTokenTransactionHash)
 		if err != nil {
 			return nil, nil, fmt.Errorf("failed to create signature: %w", err)
 		}
@@ -115,7 +115,7 @@ func StartTokenTransactionCoordinated(
 	}
 
 	startResponse, err := sparkClient.StartTransaction(tmpCtx, &tokenpb.StartTransactionRequest{
-		IdentityPublicKey:                      config.IdentityPublicKey(),
+		IdentityPublicKey:                      config.IdentityPublicKey().Serialize(),
 		PartialTokenTransaction:                tokenTransaction,
 		PartialTokenTransactionOwnerSignatures: ownerSignaturesWithIndex,
 		ValidityDurationSeconds:                validityDurationSeconds,
@@ -219,7 +219,7 @@ func BroadcastCoordinatedTokenTransferWithExpiryDuration(
 		FinalTokenTransaction:          startResp.FinalTokenTransaction,
 		FinalTokenTransactionHash:      finalTxHash,
 		InputTtxoSignaturesPerOperator: operatorSignatures,
-		OwnerIdentityPublicKey:         config.IdentityPublicKey(),
+		OwnerIdentityPublicKey:         config.IdentityPublicKey().Serialize(),
 	}
 
 	_, err = CommitTransactionCoordinated(ctx, config, signReq)
@@ -254,7 +254,11 @@ func SignTokenTransactionFromCoordination(
 	}
 	var chosenOperatorSignatures *tokenpb.InputTtxoSignaturesPerOperator
 	for _, operatorSignatures := range operatorSignatures {
-		if bytes.Equal(operatorSignatures.OperatorIdentityPublicKey, params.Operator.IdentityPublicKey) {
+		operatorKey, err := keys.ParsePublicKey(operatorSignatures.OperatorIdentityPublicKey)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse operator identity public key: %w", err)
+		}
+		if operatorKey.Equals(params.Operator.IdentityPublicKey) {
 			chosenOperatorSignatures = operatorSignatures
 			break
 		}
@@ -263,7 +267,7 @@ func SignTokenTransactionFromCoordination(
 		return nil, fmt.Errorf("no signatures found for operator %s: %w", params.Operator.Identifier, err)
 	}
 
-	sparkConn, err := common.NewGRPCConnectionWithTestTLS(params.Operator.Address, nil)
+	sparkConn, err := common.NewGRPCConnectionWithTestTLS(params.Operator.AddressRpc, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -274,7 +278,7 @@ func SignTokenTransactionFromCoordination(
 		FinalTokenTransaction:          params.TokenTransaction,
 		FinalTokenTransactionHash:      params.FinalTxHash,
 		InputTtxoSignaturesPerOperator: chosenOperatorSignatures,
-		OwnerIdentityPublicKey:         config.IdentityPublicKey(),
+		OwnerIdentityPublicKey:         config.IdentityPublicKey().Serialize(),
 	})
 }
 
@@ -297,9 +301,9 @@ func FreezeTokensV1(
 	var lastResponse *tokenpb.FreezeTokensResponse
 	timestamp := uint64(time.Now().UnixMilli())
 	for _, operator := range config.SigningOperators {
-		operatorConn, err := common.NewGRPCConnectionWithTestTLS(operator.Address, nil)
+		operatorConn, err := common.NewGRPCConnectionWithTestTLS(operator.AddressRpc, nil)
 		if err != nil {
-			log.Printf("Error while establishing gRPC connection to coordinator at %s: %v", operator.Address, err)
+			log.Printf("Error while establishing gRPC connection to coordinator at %s: %v", operator.AddressRpc, err)
 			return nil, err
 		}
 		defer operatorConn.Close()
@@ -316,7 +320,7 @@ func FreezeTokensV1(
 			Version:                   1,
 			OwnerPublicKey:            ownerPublicKey,
 			TokenIdentifier:           tokenIdentifier,
-			OperatorIdentityPublicKey: operator.IdentityPublicKey,
+			OperatorIdentityPublicKey: operator.IdentityPublicKey.Serialize(),
 			IssuerProvidedTimestamp:   timestamp,
 			ShouldUnfreeze:            shouldUnfreeze,
 		}
@@ -325,8 +329,7 @@ func FreezeTokensV1(
 			return nil, fmt.Errorf("failed to hash freeze tokens payload: %v", err)
 		}
 
-		signingPrivKeySecp := secp256k1.PrivKeyFromBytes(config.IdentityPrivateKey.Serialize())
-		sig, err := SignHashSlice(config, signingPrivKeySecp, payloadHash)
+		sig, err := SignHashSlice(config, config.IdentityPrivateKey, payloadHash)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create signature: %v", err)
 		}
@@ -358,13 +361,13 @@ func CreateOperatorSpecificSignatures(
 		for i, privKey := range ownerPrivateKeys {
 			payload := &pb.OperatorSpecificTokenTransactionSignablePayload{
 				FinalTokenTransactionHash: finalTxHash,
-				OperatorIdentityPublicKey: operator.IdentityPublicKey,
+				OperatorIdentityPublicKey: operator.IdentityPublicKey.Serialize(),
 			}
 			payloadHash, err := utils.HashOperatorSpecificTokenTransactionSignablePayload(payload)
 			if err != nil {
 				return nil, fmt.Errorf("error while hashing operator-specific payload: %w", err)
 			}
-			sig, err := SignHashSlice(config, privKey, payloadHash)
+			sig, err := SignHashSlice(config, keys.PrivateFromKey(*privKey), payloadHash)
 			if err != nil {
 				return nil, fmt.Errorf("error while creating operator-specific signature: %w", err)
 			}
@@ -377,7 +380,7 @@ func CreateOperatorSpecificSignatures(
 
 		operatorSignatures = append(operatorSignatures, &tokenpb.InputTtxoSignaturesPerOperator{
 			TtxoSignatures:            ttxoSignatures,
-			OperatorIdentityPublicKey: operator.IdentityPublicKey,
+			OperatorIdentityPublicKey: operator.IdentityPublicKey.Serialize(),
 		})
 	}
 
@@ -407,7 +410,7 @@ func ExchangeRevocationSecretsManually(
 			return fmt.Errorf("operator %s not found in signing operators", identifier)
 		}
 		allOperatorSignaturesPackage = append(allOperatorSignaturesPackage, &tokeninternalpb.OperatorTransactionSignature{
-			OperatorIdentityPublicKey: operator.IdentityPublicKey,
+			OperatorIdentityPublicKey: operator.IdentityPublicKey.Serialize(),
 			Signature:                 sig,
 		})
 	}
@@ -425,7 +428,7 @@ func ExchangeRevocationSecretsManually(
 		FinalTokenTransactionHash:     exchangeParams.FinalTxHash,
 		OperatorTransactionSignatures: allOperatorSignaturesPackage,
 		OperatorShares:                exchangeParams.RevocationShares,
-		OperatorIdentityPublicKey:     config.IdentityPublicKey(),
+		OperatorIdentityPublicKey:     config.IdentityPublicKey().Serialize(),
 	})
 	if err != nil {
 		return fmt.Errorf("failed to exchange revocation secrets with operator %s: %w", exchangeParams.TargetOperator.Identifier, err)
@@ -480,24 +483,20 @@ func PrepareRevocationSharesFromCoordinator(
 
 	sharesToReturnMap := make(map[string]*tokeninternalpb.OperatorRevocationShares)
 
-	allOperatorPubkeys := make([]helper.OperatorIdentityPubkey, 0, len(config.SigningOperators))
+	allOperatorPubkeys := make([]keys.Public, 0, len(config.SigningOperators))
 	for _, operator := range config.SigningOperators {
-		identityPubkey, err := helper.NewOperatorIdentityPubkey(operator.IdentityPublicKey)
-		if err != nil {
-			return nil, fmt.Errorf("failed to create operator identity public key: %w", err)
-		}
-		allOperatorPubkeys = append(allOperatorPubkeys, identityPubkey)
+		allOperatorPubkeys = append(allOperatorPubkeys, operator.IdentityPublicKey)
 	}
 
 	for _, identityPubkey := range allOperatorPubkeys {
-		sharesToReturnMap[identityPubkey.String()] = &tokeninternalpb.OperatorRevocationShares{
-			OperatorIdentityPublicKey: identityPubkey.Bytes(),
+		sharesToReturnMap[identityPubkey.ToHex()] = &tokeninternalpb.OperatorRevocationShares{
+			OperatorIdentityPublicKey: identityPubkey.Serialize(),
 			Shares:                    make([]*tokeninternalpb.RevocationSecretShare, 0, len(outputsToSpend)),
 		}
 	}
 
 	coordinator := config.SigningOperators[config.CoodinatorIdentifier]
-	coordinatorPubKeyStr := hex.EncodeToString(coordinator.IdentityPublicKey)
+	coordinatorPubKeyStr := coordinator.IdentityPublicKey.ToHex()
 	for _, outputWithKeyShare := range outputsWithKeyShares {
 		if keyshare := outputWithKeyShare.Edges.RevocationKeyshare; keyshare != nil {
 			if operatorShares, exists := sharesToReturnMap[coordinatorPubKeyStr]; exists {

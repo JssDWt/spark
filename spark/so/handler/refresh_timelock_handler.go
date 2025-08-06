@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/lightsparkdev/spark/common/keys"
+
 	"github.com/btcsuite/btcd/wire"
 	"github.com/google/uuid"
 	"github.com/lightsparkdev/spark"
@@ -162,7 +164,7 @@ func (h *RefreshTimelockHandler) refreshTimelock(ctx context.Context, req *pb.Re
 		if (len(node.DirectTx) > 0 && len(signingTxs) == 3 && signingSequence >= currentSequence) || (len(node.DirectTx) == 0 && len(signingTxs) == 1 && signingSequence >= currentSequence) {
 			// If we are only refreshing refund txs, we should be decrementing all the timelocks
 			return nil, fmt.Errorf("sequence %d should be less than %d", signingSequence, currentSequence)
-		} else if (len(node.DirectTx) > 0 && len(signingTxs) > 3 && i >= len(signingTxs)-3 && signingSequence != spark.InitialSequence()) || (len(node.DirectTx) == 0 && len(signingTxs) > 1 && i >= len(signingTxs)-1 && signingSequence != spark.InitialSequence()) {
+		} else if (len(node.DirectTx) > 0 && len(signingTxs) > 3 && i >= len(signingTxs)-3 && signingSequence < spark.InitialSequence()) || (len(node.DirectTx) == 0 && len(signingTxs) > 1 && i >= len(signingTxs)-1 && signingSequence != spark.InitialSequence()) {
 			// Else, refund tx timelocks should be reset
 			return nil, fmt.Errorf("sequence %d should be %d", signingSequence, spark.InitialSequence())
 		}
@@ -246,11 +248,16 @@ func (h *RefreshTimelockHandler) refreshTimelock(ctx context.Context, req *pb.Re
 			return nil, fmt.Errorf("failed to get signing keyshare id: %w", err)
 		}
 
+		verifyingPubKey, err := keys.ParsePublicKey(nodes[i].VerifyingPubkey)
+		if err != nil {
+			return nil, fmt.Errorf("unable to parse verifying public key: %w", err)
+		}
+
 		signingJobs = append(signingJobs, &helper.SigningJob{
 			JobID:             uuid.New().String(),
 			SigningKeyshareID: signingKeyshare.ID,
 			Message:           sigHash,
-			VerifyingKey:      nodes[i].VerifyingPubkey,
+			VerifyingKey:      &verifyingPubKey,
 			UserCommitment:    userNonceCommitment,
 		})
 	}
