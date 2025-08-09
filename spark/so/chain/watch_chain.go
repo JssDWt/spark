@@ -713,7 +713,7 @@ func handleBlock(
 					logger.Debug("Tree node has not been signed", "node", treeNode.ID)
 					continue
 				}
-				_, err = dbTx.TreeNode.UpdateOne(treeNode).
+				treeNode, err = dbTx.TreeNode.UpdateOne(treeNode).
 					SetStatus(st.TreeNodeStatusAvailable).
 					Save(ctx)
 				if err != nil {
