@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"maps"
+	"os"
 	"runtime/debug"
 	"slices"
 	"strings"
@@ -17,6 +18,7 @@ import (
 	"github.com/btcsuite/btcd/rpcclient"
 	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcd/wire"
+	"github.com/btcsuite/btclog"
 	"github.com/lightsparkdev/spark/common"
 	"github.com/lightsparkdev/spark/common/logging"
 	pb "github.com/lightsparkdev/spark/proto/spark"
@@ -255,6 +257,10 @@ func WatchChain(
 		return err
 	}
 	connConfig := RPCClientConfig(bitcoindConfig)
+	backendLog := btclog.NewBackend(os.Stdout)
+	rpclogger := backendLog.Logger("chainwatcher")
+
+	rpcclient.UseLogger(rpclogger)
 	bitcoinClient, err := rpcclient.New(&connConfig, nil)
 	if err != nil {
 		return err
