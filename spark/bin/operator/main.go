@@ -58,6 +58,7 @@ import (
 	"go.opentelemetry.io/otel/trace/noop"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/keepalive"
 )
 
@@ -87,6 +88,7 @@ type args struct {
 	RateLimiterEnabled         bool
 	RateLimiterMemcachedAddrs  string
 	EntDebug                   bool
+	DisableTLS                 bool
 }
 
 func (a *args) SupportedNetworksList() []common.Network {
@@ -134,6 +136,7 @@ func loadArgs() (*args, error) {
 	flag.StringVar(&args.RunDirectory, "run-dir", "", "Run directory for resolving relative paths")
 	flag.StringVar(&args.RateLimiterMemcachedAddrs, "rate-limiter-memcached-addrs", "", "Comma-separated list of Memcached addresses")
 	flag.BoolVar(&args.EntDebug, "ent-debug", false, "Log all the SQL queries")
+	flag.BoolVar(&args.DisableTLS, "disable-tls", false, "Disable TLS (for testing only!)")
 
 	// Parse flags
 	flag.Parse()
@@ -594,19 +597,25 @@ func main() {
 		)),
 	)
 
-	cert, err := tls.LoadX509KeyPair(args.ServerCertPath, args.ServerKeyPath)
-	if err != nil {
-		logger.Fatal("Failed to load server certificate", zap.Error(err))
-	}
+	var tlsConfig *tls.Config = nil
+	if !args.DisableTLS {
+		cert, err := tls.LoadX509KeyPair(args.ServerCertPath, args.ServerKeyPath)
+		if err != nil {
+			logger.Fatal("Failed to load server certificate", zap.Error(err))
+		}
 
-	tlsConfig := tls.Config{
-		Certificates: []tls.Certificate{cert},
-		ClientAuth:   tls.NoClientCert,
-		MinVersion:   tls.VersionTLS12,
-	}
+		tlsConfig = &tls.Config{
+			Certificates: []tls.Certificate{cert},
+			ClientAuth:   tls.NoClientCert,
+			MinVersion:   tls.VersionTLS12,
+		}
 
-	creds := credentials.NewTLS(&tlsConfig)
-	serverOpts = append(serverOpts, grpc.Creds(creds))
+		creds := credentials.NewTLS(tlsConfig)
+		serverOpts = append(serverOpts, grpc.Creds(creds))
+	} else {
+		logger.Warn("TLS is disabled! This should only be used for testing purposes.")
+		serverOpts = append(serverOpts, grpc.Creds(insecure.NewCredentials()))
+	}
 	grpcServer := grpc.NewServer(serverOpts...)
 
 	err = RegisterGrpcServers(
@@ -670,11 +679,17 @@ func main() {
 	server := &http.Server{
 		Addr:      fmt.Sprintf(":%d", args.Port),
 		Handler:   mux,
-		TLSConfig: &tlsConfig,
+		TLSConfig: tlsConfig,
 	}
 
 	errGrp.Go(func() error {
-		if err := server.ListenAndServeTLS("", ""); !errors.Is(err, http.ErrServerClosed) {
+		var err error
+		if tlsConfig != nil {
+			err = server.ListenAndServeTLS("", "")
+		} else {
+			err = server.ListenAndServe()
+		}
+		if !errors.Is(err, http.ErrServerClosed) {
 			logger.Error("HTTP server failed", zap.Error(err))
 			return err
 		}
