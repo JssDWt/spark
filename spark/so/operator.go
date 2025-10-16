@@ -30,6 +30,8 @@ type SigningOperator struct {
 	IdentityPublicKey keys.Public
 	// ServerCertPath is the path to the server certificate.
 	CertPath string
+	// DisableTLS indicates whether to disable TLS for the connection.
+	DisableTLS bool
 	// ExternalAddress is the external address of the signing operator.
 	ExternalAddress string
 	// Generates connections to the signing operator. By default, will use
@@ -49,7 +51,7 @@ type operatorConnectionFactorySecure struct {
 }
 
 func (o *operatorConnectionFactorySecure) NewGRPCConnection(address string, retryPolicy *common.RetryPolicyConfig, clientTimeoutConfig *common.ClientTimeoutConfig) (*grpc.ClientConn, error) {
-	return common.NewGRPCConnection(address, o.operator.CertPath, retryPolicy, clientTimeoutConfig)
+	return common.NewGRPCConnection(address, o.operator.CertPath, retryPolicy, clientTimeoutConfig, o.operator.DisableTLS)
 }
 
 func NewOperatorConnectionFactorySecure(operator *SigningOperator) OperatorConnectionFactory {
@@ -93,6 +95,7 @@ func (s *SigningOperator) UnmarshalJSON(data []byte) error {
 		s.AddressDkg = js.Address // Use the same address for DKG if not specified
 	}
 	s.CertPath = js.CertPath
+	s.DisableTLS = true
 	s.ExternalAddress = js.ExternalAddress
 	s.OperatorConnectionFactory = NewOperatorConnectionFactorySecure(s)
 	return nil

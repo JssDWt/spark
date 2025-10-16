@@ -108,7 +108,7 @@ func BasicClientOptions(address string, retryPolicy *RetryPolicyConfig, clientTi
 // Creates a secure gRPC connection to the given address. If certPath is empty, it will create a connection to the
 // address as a Unix domain socket (which is a secure connection). If address is not a Unix domain socket, it will
 // return an error.
-func NewGRPCConnection(address string, certPath string, retryPolicy *RetryPolicyConfig, clientTimeoutConfig *ClientTimeoutConfig) (*grpc.ClientConn, error) {
+func NewGRPCConnection(address string, certPath string, retryPolicy *RetryPolicyConfig, clientTimeoutConfig *ClientTimeoutConfig, disableTLS bool) (*grpc.ClientConn, error) {
 	if len(certPath) == 0 {
 		return NewGRPCConnectionUnixDomainSocket(address, retryPolicy, clientTimeoutConfig)
 	}
@@ -134,14 +134,21 @@ func NewGRPCConnection(address string, certPath string, retryPolicy *RetryPolicy
 		host = "localhost"
 	}
 
-	clientOpts = append(
-		clientOpts,
-		grpc.WithTransportCredentials(credentials.NewTLS(&tls.Config{
-			InsecureSkipVerify: host == "localhost",
-			RootCAs:            certPool,
-			ServerName:         host,
-		})),
-	)
+	if disableTLS {
+		clientOpts = append(
+			clientOpts,
+			grpc.WithTransportCredentials(insecure.NewCredentials()),
+		)
+	} else {
+		clientOpts = append(
+			clientOpts,
+			grpc.WithTransportCredentials(credentials.NewTLS(&tls.Config{
+				InsecureSkipVerify: host == "localhost",
+				RootCAs:            certPool,
+				ServerName:         host,
+			})),
+		)
+	}
 
 	return grpc.NewClient(address, clientOpts...)
 }
