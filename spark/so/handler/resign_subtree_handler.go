@@ -344,8 +344,8 @@ func (h *ReSignSubtreeHandler) buildSplitTxSigningJobs(
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse split tx: %w", err)
 	}
-	if tx.TxIn[0].Sequence != spark.ZeroSequence {
-		return nil, fmt.Errorf("split tx sequence must be ZeroSequence, got %d", tx.TxIn[0].Sequence)
+	if tx.TxIn[0].Sequence != spark.ZeroSequence && tx.TxIn[0].Sequence != 0 {
+		return nil, fmt.Errorf("split tx sequence must be ZeroSequence or 0, got %d", tx.TxIn[0].Sequence)
 	}
 	if len(tx.TxOut) != 3 {
 		return nil, fmt.Errorf("split tx must have 3 outputs (2 children + anchor), got %d", len(tx.TxOut))
