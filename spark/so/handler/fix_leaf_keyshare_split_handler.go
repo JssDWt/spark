@@ -13,6 +13,7 @@ import (
 	pbssp "github.com/lightsparkdev/spark/proto/spark_ssp_internal"
 	"github.com/lightsparkdev/spark/so"
 	"github.com/lightsparkdev/spark/so/ent"
+	st "github.com/lightsparkdev/spark/so/ent/schema/schematype"
 	enttreenode "github.com/lightsparkdev/spark/so/ent/treenode"
 )
 
@@ -126,6 +127,10 @@ func (h *FixLeafKeyshareSplitHandler) FixLeafKeyshareSplit(
 		leftSparkOperatorKeyshare, err = db.SigningKeyshare.Get(ctx, leftKeyshareID)
 		if err != nil {
 			return nil, fmt.Errorf("failed to get left keyshare: %w", err)
+		}
+		_, err = leftSparkOperatorKeyshare.Update().SetStatus(st.KeyshareStatusInUse).Save(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("failed to mark left keyshare as in use: %w", err)
 		}
 	}
 
