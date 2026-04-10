@@ -125,6 +125,23 @@ func (h *TreeVizHandler) GetTreeSnapshot(
 		return nil, fmt.Errorf("failed to load tree %s: %w", treeID, err)
 	}
 
+	// The Root edge on Tree is often unset. Fall back to the node with no
+	// parent, which is the root by definition in Spark's tree structure.
+	if treeEnt.Edges.Root == nil {
+		root, err := db.TreeNode.Query().
+			Where(
+				enttreenode.HasTreeWith(enttree.IDEQ(treeID)),
+				enttreenode.Not(enttreenode.HasParent()),
+			).
+			Only(ctx)
+		if err != nil && !ent.IsNotFound(err) {
+			return nil, fmt.Errorf("failed to find root node for tree %s: %w", treeID, err)
+		}
+		if root != nil {
+			treeEnt.Edges.Root = root
+		}
+	}
+
 	totalNodeCount, err := db.TreeNode.Query().
 		Where(enttreenode.HasTreeWith(enttree.IDEQ(treeID))).
 		Count(ctx)
