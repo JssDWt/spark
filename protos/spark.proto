@@ -93,6 +93,9 @@ service SparkService {
 
     rpc update_wallet_setting(UpdateWalletSettingRequest) returns (UpdateWalletSettingResponse) {}
     rpc query_wallet_setting(QueryWalletSettingRequest) returns (QueryWalletSettingResponse) {}
+
+    rpc prepare_tree_address(PrepareTreeAddressRequest) returns (PrepareTreeAddressResponse) {}
+    rpc create_tree(CreateTreeRequest) returns (CreateTreeResponse) {}
 }
 
 message SubscribeToEventsRequest {

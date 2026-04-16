@@ -352,3 +352,15 @@ func (s *SparkServer) QueryWalletSetting(ctx context.Context, req *pb.QueryWalle
 	walletSettingHandler := handler.NewWalletSettingHandler(s.config)
 	return walletSettingHandler.QueryWalletSetting(ctx, req)
 }
+
+// PrepareTreeAddress prepares addresses for a transaction tree.
+func (s *SparkServer) PrepareTreeAddress(ctx context.Context, req *pb.PrepareTreeAddressRequest) (*pb.PrepareTreeAddressResponse, error) {
+	treeCreationHandler := handler.NewTreeCreationHandler(s.config)
+	return treeCreationHandler.PrepareTreeAddress(ctx, req)
+}
+
+// CreateTree creates a transaction tree from a deposit.
+func (s *SparkServer) CreateTree(ctx context.Context, req *pb.CreateTreeRequest) (*pb.CreateTreeResponse, error) {
+	treeCreationHandler := handler.NewTreeCreationHandler(s.config)
+	return treeCreationHandler.CreateTree(ctx, req)
+}

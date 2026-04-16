@@ -60,6 +60,8 @@ const (
 	SparkService_InitiateSwapPrimaryTransfer_FullMethodName         = "/spark.SparkService/initiate_swap_primary_transfer"
 	SparkService_UpdateWalletSetting_FullMethodName                 = "/spark.SparkService/update_wallet_setting"
 	SparkService_QueryWalletSetting_FullMethodName                  = "/spark.SparkService/query_wallet_setting"
+	SparkService_PrepareTreeAddress_FullMethodName                  = "/spark.SparkService/prepare_tree_address"
+	SparkService_CreateTree_FullMethodName                          = "/spark.SparkService/create_tree"
 )
 
 // SparkServiceClient is the client API for SparkService service.
@@ -126,6 +128,8 @@ type SparkServiceClient interface {
 	InitiateSwapPrimaryTransfer(ctx context.Context, in *InitiateSwapPrimaryTransferRequest, opts ...grpc.CallOption) (*InitiateSwapPrimaryTransferResponse, error)
 	UpdateWalletSetting(ctx context.Context, in *UpdateWalletSettingRequest, opts ...grpc.CallOption) (*UpdateWalletSettingResponse, error)
 	QueryWalletSetting(ctx context.Context, in *QueryWalletSettingRequest, opts ...grpc.CallOption) (*QueryWalletSettingResponse, error)
+	PrepareTreeAddress(ctx context.Context, in *PrepareTreeAddressRequest, opts ...grpc.CallOption) (*PrepareTreeAddressResponse, error)
+	CreateTree(ctx context.Context, in *CreateTreeRequest, opts ...grpc.CallOption) (*CreateTreeResponse, error)
 }
 
 type sparkServiceClient struct {
@@ -545,6 +549,26 @@ func (c *sparkServiceClient) QueryWalletSetting(ctx context.Context, in *QueryWa
 	return out, nil
 }
 
+func (c *sparkServiceClient) PrepareTreeAddress(ctx context.Context, in *PrepareTreeAddressRequest, opts ...grpc.CallOption) (*PrepareTreeAddressResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(PrepareTreeAddressResponse)
+	err := c.cc.Invoke(ctx, SparkService_PrepareTreeAddress_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *sparkServiceClient) CreateTree(ctx context.Context, in *CreateTreeRequest, opts ...grpc.CallOption) (*CreateTreeResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(CreateTreeResponse)
+	err := c.cc.Invoke(ctx, SparkService_CreateTree_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // SparkServiceServer is the server API for SparkService service.
 // All implementations must embed UnimplementedSparkServiceServer
 // for forward compatibility.
@@ -609,6 +633,8 @@ type SparkServiceServer interface {
 	InitiateSwapPrimaryTransfer(context.Context, *InitiateSwapPrimaryTransferRequest) (*InitiateSwapPrimaryTransferResponse, error)
 	UpdateWalletSetting(context.Context, *UpdateWalletSettingRequest) (*UpdateWalletSettingResponse, error)
 	QueryWalletSetting(context.Context, *QueryWalletSettingRequest) (*QueryWalletSettingResponse, error)
+	PrepareTreeAddress(context.Context, *PrepareTreeAddressRequest) (*PrepareTreeAddressResponse, error)
+	CreateTree(context.Context, *CreateTreeRequest) (*CreateTreeResponse, error)
 	mustEmbedUnimplementedSparkServiceServer()
 }
 
@@ -738,6 +764,12 @@ func (UnimplementedSparkServiceServer) UpdateWalletSetting(context.Context, *Upd
 }
 func (UnimplementedSparkServiceServer) QueryWalletSetting(context.Context, *QueryWalletSettingRequest) (*QueryWalletSettingResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method QueryWalletSetting not implemented")
+}
+func (UnimplementedSparkServiceServer) PrepareTreeAddress(context.Context, *PrepareTreeAddressRequest) (*PrepareTreeAddressResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method PrepareTreeAddress not implemented")
+}
+func (UnimplementedSparkServiceServer) CreateTree(context.Context, *CreateTreeRequest) (*CreateTreeResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method CreateTree not implemented")
 }
 func (UnimplementedSparkServiceServer) mustEmbedUnimplementedSparkServiceServer() {}
 func (UnimplementedSparkServiceServer) testEmbeddedByValue()                      {}
@@ -1473,6 +1505,42 @@ func _SparkService_QueryWalletSetting_Handler(srv interface{}, ctx context.Conte
 	return interceptor(ctx, in, info, handler)
 }
 
+func _SparkService_PrepareTreeAddress_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(PrepareTreeAddressRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SparkServiceServer).PrepareTreeAddress(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SparkService_PrepareTreeAddress_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SparkServiceServer).PrepareTreeAddress(ctx, req.(*PrepareTreeAddressRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _SparkService_CreateTree_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CreateTreeRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SparkServiceServer).CreateTree(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SparkService_CreateTree_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SparkServiceServer).CreateTree(ctx, req.(*CreateTreeRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // SparkService_ServiceDesc is the grpc.ServiceDesc for SparkService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -1635,6 +1703,14 @@ var SparkService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "query_wallet_setting",
 			Handler:    _SparkService_QueryWalletSetting_Handler,
+		},
+		{
+			MethodName: "prepare_tree_address",
+			Handler:    _SparkService_PrepareTreeAddress_Handler,
+		},
+		{
+			MethodName: "create_tree",
+			Handler:    _SparkService_CreateTree_Handler,
 		},
 	},
 	Streams: []grpc.StreamDesc{
