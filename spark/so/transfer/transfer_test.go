@@ -20,10 +20,10 @@ func TestMapTransferToReceiverStatus(t *testing.T) {
 	}{
 		// Pre-tweak transfer states map to INITIATED on the receiver side
 		// (sender hasn't completed key-tweak handoff yet).
-		{st.TransferStatusSenderInitiated, st.TransferReceiverStatusSenderInitiated},
-		{st.TransferStatusSenderInitiatedCoordinator, st.TransferReceiverStatusSenderInitiated},
-		{st.TransferStatusSenderKeyTweakPending, st.TransferReceiverStatusSenderInitiated},
-		{st.TransferStatusApplyingSenderKeyTweak, st.TransferReceiverStatusSenderInitiated},
+		{st.TransferStatusSenderInitiated, st.TransferReceiverStatusInitiated},
+		{st.TransferStatusSenderInitiatedCoordinator, st.TransferReceiverStatusInitiated},
+		{st.TransferStatusSenderKeyTweakPending, st.TransferReceiverStatusInitiated},
+		{st.TransferStatusApplyingSenderKeyTweak, st.TransferReceiverStatusInitiated},
 
 		// Critical: SENDER_KEY_TWEAKED maps to RECEIVER_CLAIM_PENDING. Sender
 		// has completed handoff, receiver is now expected to claim.

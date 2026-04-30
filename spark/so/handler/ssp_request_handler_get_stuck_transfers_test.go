@@ -105,7 +105,7 @@ func (f *stuckFixture) makeTransfer(opts transferOpts) *ent.Transfer {
 	}
 	receiverState := opts.receiverState
 	if receiverState == "" {
-		receiverState = st.TransferReceiverStatusSenderInitiated
+		receiverState = st.TransferReceiverStatusInitiated
 	}
 
 	transfer, err := f.client.Transfer.Create().
@@ -286,7 +286,7 @@ func TestGetStuckTransfers_MIMO_InitiatedNotStuck(t *testing.T) {
 		transferState: st.TransferStatusSenderKeyTweaked,
 		sender:        f.newPubkey(),
 		receiver:      user,
-		receiverState: st.TransferReceiverStatusSenderInitiated, // == "INITIATED"
+		receiverState: st.TransferReceiverStatusInitiated, // == "INITIATED"
 	})
 
 	ids := f.getStuckTransferIDs(user, pb.Network_UNSPECIFIED, 50, 0)
@@ -718,7 +718,7 @@ func TestGetStuckTransfers_MIMO_NoPubkey_InitiatedNotStuck(t *testing.T) {
 		transferState: st.TransferStatusSenderKeyTweaked,
 		sender:        f.newPubkey(),
 		receiver:      f.newPubkey(),
-		receiverState: st.TransferReceiverStatusSenderInitiated, // == "INITIATED"
+		receiverState: st.TransferReceiverStatusInitiated, // == "INITIATED"
 	})
 
 	ids := f.getAllStuckTransferIDs(pb.Network_UNSPECIFIED, 50, 0)

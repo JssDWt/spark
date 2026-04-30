@@ -91,10 +91,10 @@ func TestMarkReceiversClaimPending_OnlyUpdatesInitiated(t *testing.T) {
 	f := newDualWriteFixture(t)
 
 	transfer, receivers := f.makeTransferWithReceivers([]st.TransferReceiverStatus{
-		st.TransferReceiverStatusSenderInitiated, // -> RECEIVER_CLAIM_PENDING
-		st.TransferReceiverStatusSenderInitiated, // -> RECEIVER_CLAIM_PENDING
-		st.TransferReceiverStatusKeyTweaked,      // unchanged (already past pending)
-		st.TransferReceiverStatusCompleted,       // unchanged (terminal)
+		st.TransferReceiverStatusInitiated,  // -> RECEIVER_CLAIM_PENDING
+		st.TransferReceiverStatusInitiated,  // -> RECEIVER_CLAIM_PENDING
+		st.TransferReceiverStatusKeyTweaked, // unchanged (already past pending)
+		st.TransferReceiverStatusCompleted,  // unchanged (terminal)
 	})
 
 	require.NoError(t, transferpkg.MarkReceiversClaimPending(f.ctx, f.client, transfer.ID))
@@ -112,16 +112,16 @@ func TestMarkReceiversClaimPending_ScopedToTransfer(t *testing.T) {
 	f := newDualWriteFixture(t)
 
 	transferA, receiversA := f.makeTransferWithReceivers([]st.TransferReceiverStatus{
-		st.TransferReceiverStatusSenderInitiated,
+		st.TransferReceiverStatusInitiated,
 	})
 	_, receiversB := f.makeTransferWithReceivers([]st.TransferReceiverStatus{
-		st.TransferReceiverStatusSenderInitiated,
+		st.TransferReceiverStatusInitiated,
 	})
 
 	require.NoError(t, transferpkg.MarkReceiversClaimPending(f.ctx, f.client, transferA.ID))
 
 	assert.Equal(t, st.TransferReceiverStatusReceiverClaimPending, f.reloadStatus(receiversA[0].ID))
-	assert.Equal(t, st.TransferReceiverStatusSenderInitiated, f.reloadStatus(receiversB[0].ID),
+	assert.Equal(t, st.TransferReceiverStatusInitiated, f.reloadStatus(receiversB[0].ID),
 		"receiver on a different transfer must NOT be touched")
 }
 
@@ -132,8 +132,8 @@ func TestMarkReceiversClaimPending_Idempotent(t *testing.T) {
 	f := newDualWriteFixture(t)
 
 	transfer, receivers := f.makeTransferWithReceivers([]st.TransferReceiverStatus{
-		st.TransferReceiverStatusSenderInitiated,
-		st.TransferReceiverStatusSenderInitiated,
+		st.TransferReceiverStatusInitiated,
+		st.TransferReceiverStatusInitiated,
 	})
 
 	require.NoError(t, transferpkg.MarkReceiversClaimPending(f.ctx, f.client, transfer.ID))
@@ -151,11 +151,11 @@ func TestMarkReceiversClaimPending_MultiReceiverFlipsAll(t *testing.T) {
 	f := newDualWriteFixture(t)
 
 	transfer, receivers := f.makeTransferWithReceivers([]st.TransferReceiverStatus{
-		st.TransferReceiverStatusSenderInitiated,
-		st.TransferReceiverStatusSenderInitiated,
-		st.TransferReceiverStatusSenderInitiated,
-		st.TransferReceiverStatusSenderInitiated,
-		st.TransferReceiverStatusSenderInitiated,
+		st.TransferReceiverStatusInitiated,
+		st.TransferReceiverStatusInitiated,
+		st.TransferReceiverStatusInitiated,
+		st.TransferReceiverStatusInitiated,
+		st.TransferReceiverStatusInitiated,
 	})
 
 	require.NoError(t, transferpkg.MarkReceiversClaimPending(f.ctx, f.client, transfer.ID))
