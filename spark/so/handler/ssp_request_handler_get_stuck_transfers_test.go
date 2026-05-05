@@ -294,7 +294,7 @@ func TestGetStuckTransfers_MIMO_InitiatedNotStuck(t *testing.T) {
 }
 
 // TestGetStuckTransfers_MIMO_ReceiverClaimPendingNotStuck codifies the
-// deliberate exclusion of RECEIVER_CLAIM_PENDING from mimoStuckReceiverStatuses.
+// deliberate exclusion of RECEIVER_CLAIM_PENDING from mimo.StuckReceiverStatuses.
 // Sender has finished its key-tweak handoff (transfer at SENDER_KEY_TWEAKED)
 // and the receiver is in the post-tweak/pre-claim window; they haven't started
 // claiming yet, so they aren't stuck — they just haven't polled.
