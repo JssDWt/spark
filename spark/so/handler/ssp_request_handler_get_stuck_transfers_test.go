@@ -904,3 +904,89 @@ func TestGetStuckTransfers_MIMO_NoPubkey_BothArmsOrdering(t *testing.T) {
 	assert.Equal(t, []uuid.UUID{newestSender.ID, middleReceiver.ID, oldestSender.ID}, ids,
 		"union of sender and receiver arms must interleave by create_time, not concatenate by arm")
 }
+
+// -----------------------------------------------------------------------------
+// SigningKeysharePublicShares — exercises marshalStuckTransfer's edge walk over
+// preloaded transfer_leaves -> leaf -> signing_keyshare. Regression guard: if a
+// query path forgets the preload chain, the leaf edge will be nil and the
+// handler will return an error rather than silently emitting an empty map.
+// -----------------------------------------------------------------------------
+
+func assertStuckTransferKeyshare(t *testing.T, f *stuckFixture, stuck *pbssp.StuckTransfer, transfer *ent.Transfer) {
+	t.Helper()
+	leaves, err := transfer.QueryTransferLeaves().QueryLeaf().All(f.ctx)
+	require.NoError(t, err)
+	require.Len(t, leaves, 1)
+	leafID := leaves[0].ID.String()
+
+	require.Contains(t, stuck.SigningKeysharePublicShares, leafID,
+		"expected SigningKeysharePublicShares to include entry for attached leaf")
+	assert.NotEmpty(t, stuck.SigningKeysharePublicShares[leafID].PublicShares,
+		"expected non-empty PublicShares for leaf")
+}
+
+func TestGetStuckTransfers_MIMO_IncludesSigningKeyshares(t *testing.T) {
+	f := newStuckFixture(t)
+	user := f.newPubkey()
+
+	transfer := f.makeTransferWithLeaf(transferOpts{
+		transferState: st.TransferStatusReceiverKeyTweaked,
+		sender:        f.newPubkey(),
+		receiver:      user,
+		receiverState: st.TransferReceiverStatusKeyTweaked,
+	})
+
+	resp, err := f.handler.GetStuckTransfers(f.ctx, &pbssp.GetStuckTransfersRequest{
+		UserIdentityPublicKey: user.Serialize(),
+		Limit:                 50,
+	})
+	require.NoError(t, err)
+	require.Len(t, resp.Transfers, 1)
+	require.Equal(t, transfer.ID.String(), resp.Transfers[0].Transfer.Id)
+	assertStuckTransferKeyshare(t, f, resp.Transfers[0], transfer)
+}
+
+func TestGetStuckTransfers_Legacy_IncludesSigningKeyshares(t *testing.T) {
+	f := newStuckFixture(t)
+	// Override the MIMO knob to force the legacy code path.
+	f.ctx = knobs.InjectKnobsService(f.ctx, knobs.NewFixedKnobs(map[string]float64{
+		knobs.KnobReadMIMODataModelGetStuckTransfers: 0,
+	}))
+	user := f.newPubkey()
+
+	transfer := f.makeTransferWithLeaf(transferOpts{
+		transferState: st.TransferStatusReceiverKeyTweaked,
+		sender:        f.newPubkey(),
+		receiver:      user,
+		receiverState: st.TransferReceiverStatusKeyTweaked,
+	})
+
+	resp, err := f.handler.GetStuckTransfers(f.ctx, &pbssp.GetStuckTransfersRequest{
+		UserIdentityPublicKey: user.Serialize(),
+		Limit:                 50,
+	})
+	require.NoError(t, err)
+	require.Len(t, resp.Transfers, 1)
+	require.Equal(t, transfer.ID.String(), resp.Transfers[0].Transfer.Id)
+	assertStuckTransferKeyshare(t, f, resp.Transfers[0], transfer)
+}
+
+func TestQueryStuckTransfer_IncludesSigningKeyshares(t *testing.T) {
+	f := newStuckFixture(t)
+	user := f.newPubkey()
+
+	transfer := f.makeTransferWithLeaf(transferOpts{
+		transferState: st.TransferStatusReceiverKeyTweaked,
+		sender:        f.newPubkey(),
+		receiver:      user,
+		receiverState: st.TransferReceiverStatusKeyTweaked,
+	})
+
+	resp, err := f.handler.QueryStuckTransfer(f.ctx, &pbssp.QueryStuckTransferRequest{
+		Id: transfer.ID.String(),
+	})
+	require.NoError(t, err)
+	require.NotNil(t, resp.Transfer)
+	require.Equal(t, transfer.ID.String(), resp.Transfer.Transfer.Id)
+	assertStuckTransferKeyshare(t, f, resp.Transfer, transfer)
+}
