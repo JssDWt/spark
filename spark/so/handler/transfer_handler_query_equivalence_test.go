@@ -1278,6 +1278,13 @@ func TestQueryAllTransfers_Equivalence_OutgoingInFlight(t *testing.T) {
 				pb.TransferStatus_TRANSFER_STATUS_RECEIVER_KEY_TWEAKED,
 			),
 		},
+		// nil filter — routing must not panic; both paths fall through to legacy
+		// which rejects with InvalidArgument.
+		{
+			"nil_filter_rejected",
+			f.medium,
+			nil,
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1319,4 +1326,241 @@ func TestQueryAllTransfers_Equivalence_OutgoingInFlight_SelfTransfer(t *testing.
 	)
 	legacy, mimo, lerr, merr := f.runBothPathsAllTransfers(self, filter)
 	assertResultsEquivalent(t, "self_transfer_4state", legacy, mimo, lerr, merr)
+}
+
+// -----------------------------------------------------------------------------
+// QueryAllTransfers equivalence — legacy queryTransfers vs the specialized
+// queryByTypes path. Same rollout-safety contract as the outgoing-in-flight
+// suite above. The dominant prod shape (~75k/h post-#6521 ramp) is SR1 +
+// 4-type [TRANSFER, PREIMAGE_SWAP, COOPERATIVE_EXIT, UTXO_SWAP] + no status
+// filter — these tests pin equivalence for that shape and its sender / receiver
+// only variants, plus the fall-through cases that must continue to route to
+// legacy.
+// -----------------------------------------------------------------------------
+
+func (f *equivFixture) ctxForByTypes(viewer keys.Public, mimoKnob float64) context.Context {
+	ctx := authn.InjectSessionForTests(f.ctx, hex.EncodeToString(viewer.Serialize()), 9999999999)
+	return knobs.InjectKnobsService(ctx, knobs.NewFixedKnobs(map[string]float64{
+		knobs.KnobPrivacyEnabled:                 100,
+		knobs.KnobReadMIMODataModelQueryByTypes:  mimoKnob,
+		knobs.KnobReadMIMOMultiParticipantFormat: 0,
+		knobs.KnobFilterSSPCounterSwapAsTransfer: 0,
+	}))
+}
+
+func (f *equivFixture) runBothPathsAllTransfersByTypes(viewer keys.Public, filter *pb.TransferFilter) (legacyResp, mimoResp *pb.QueryTransfersResponse, legacyErr, mimoErr error) {
+	f.t.Helper()
+	ctxLegacy := f.ctxForByTypes(viewer, 0)
+	legacyResp, legacyErr = f.handler.QueryAllTransfers(ctxLegacy, filter, false)
+
+	ctxMIMO := f.ctxForByTypes(viewer, 100)
+	mimoResp, mimoErr = f.handler.QueryAllTransfers(ctxMIMO, filter, false)
+	return legacyResp, mimoResp, legacyErr, mimoErr
+}
+
+func TestQueryAllTransfers_Equivalence_ByTypes(t *testing.T) {
+	if !sparktesting.PostgresTestsEnabled() {
+		t.Skip("equivalence tests require Postgres (raw SQL execution path)")
+	}
+	f := newEquivFixture(t)
+	f.setupEquivalenceData()
+
+	feedTypes := []pb.TransferType{
+		pb.TransferType_TRANSFER,
+		pb.TransferType_PREIMAGE_SWAP,
+		pb.TransferType_COOPERATIVE_EXIT,
+		pb.TransferType_UTXO_SWAP,
+	}
+
+	cases := []struct {
+		name   string
+		viewer keys.Public
+		filter *pb.TransferFilter
+	}{
+		// SR1 4-type feed-view — the dominant prod shape this handler targets.
+		{
+			"SR1_feed_4type_medium",
+			f.medium,
+			withTypes(senderOrReceiverFilter(f.medium), feedTypes...),
+		},
+		{
+			"SR1_feed_4type_light",
+			f.light,
+			withTypes(senderOrReceiverFilter(f.light), feedTypes...),
+		},
+		{
+			"SR1_feed_4type_sender",
+			f.sender,
+			withTypes(senderOrReceiverFilter(f.sender), feedTypes...),
+		},
+		// Both arms reachable (sender and receiver on different transfers) —
+		// dedup is not load-bearing here (no self-transfer) but the UNION must
+		// merge correctly.
+		{
+			"SR1_feed_4type_both",
+			f.both,
+			withTypes(senderOrReceiverFilter(f.both), feedTypes...),
+		},
+		// Receiver-only arm.
+		{
+			"receiver_feed_4type_medium",
+			f.medium,
+			withTypes(receiverFilter(f.medium), feedTypes...),
+		},
+		// Sender-only arm.
+		{
+			"sender_feed_4type_sender",
+			f.sender,
+			withTypes(senderFilter(f.sender), feedTypes...),
+		},
+		// Single type — exercises leading-equality on the composite.
+		{
+			"SR1_single_type_TRANSFER",
+			f.medium,
+			withTypes(senderOrReceiverFilter(f.medium), pb.TransferType_TRANSFER),
+		},
+		{
+			"SR1_single_type_SWAP",
+			f.medium,
+			withTypes(senderOrReceiverFilter(f.medium), pb.TransferType_SWAP),
+		},
+		// Type set with no matches on this wallet — both paths return empty.
+		{
+			"receiver_types_no_match",
+			f.cold,
+			withTypes(receiverFilter(f.cold), pb.TransferType_COUNTER_SWAP),
+		},
+		// ORDER ASCENDING — type composite is DESC, exercises backwards walk.
+		{
+			"SR1_order_ascending",
+			f.medium,
+			withOrder(withTypes(senderOrReceiverFilter(f.medium), feedTypes...), pb.Order_ASCENDING),
+		},
+		// Pagination.
+		{
+			"SR1_pagination_limit_offset",
+			f.medium,
+			withLimitOffset(withTypes(senderOrReceiverFilter(f.medium), feedTypes...), 5, 3),
+		},
+		// Time filters.
+		{
+			"SR1_created_after",
+			f.medium,
+			withCreatedAfter(withTypes(senderOrReceiverFilter(f.medium), feedTypes...), f.baseNow.Add(-150*time.Minute)),
+		},
+		{
+			"SR1_created_before",
+			f.medium,
+			withCreatedBefore(withTypes(senderOrReceiverFilter(f.medium), feedTypes...), f.baseNow.Add(-150*time.Minute)),
+		},
+		// Fall-through: status filter set — predicate requires len(statuses) == 0.
+		{
+			"falls_through_when_status_set",
+			f.medium,
+			func() *pb.TransferFilter {
+				flt := withTypes(receiverFilter(f.medium), pb.TransferType_TRANSFER)
+				flt.Statuses = []pb.TransferStatus{pb.TransferStatus_TRANSFER_STATUS_COMPLETED}
+				return flt
+			}(),
+		},
+		// Fall-through: no types.
+		{
+			"falls_through_when_no_types",
+			f.medium,
+			receiverFilter(f.medium),
+		},
+		// Fall-through: transfer_ids set.
+		{
+			"falls_through_when_transfer_ids_set",
+			f.light,
+			withTransferIDs(withTypes(receiverFilter(f.light), pb.TransferType_TRANSFER), uuid.New().String()),
+		},
+		// Negative pagination — both paths must reject before producing data.
+		{
+			"negative_limit_rejected",
+			f.medium,
+			withLimitOffset(withTypes(senderOrReceiverFilter(f.medium), feedTypes...), -1, 0),
+		},
+		{
+			"negative_offset_rejected",
+			f.medium,
+			withLimitOffset(withTypes(senderOrReceiverFilter(f.medium), feedTypes...), 50, -1),
+		},
+		// Duplicate types — the per-type rewrite must dedupe so sub-queries stay
+		// disjoint by transfer_type; otherwise the SQL page is inflated with
+		// repeats and the resulting nextOffset diverges from the legacy path.
+		{
+			"duplicate_types_deduped",
+			f.medium,
+			withTypes(senderFilter(f.medium), pb.TransferType_TRANSFER, pb.TransferType_TRANSFER, pb.TransferType_PREIMAGE_SWAP),
+		},
+		// Malformed pubkey — both paths must reject with InvalidArgument; the
+		// new route must classify the parse error as InvalidArgumentMalformedKey
+		// rather than returning a wrapped Internal/Unknown.
+		{
+			"invalid_sender_pubkey_rejected",
+			f.medium,
+			&pb.TransferFilter{
+				Participant: &pb.TransferFilter_SenderIdentityPublicKey{
+					SenderIdentityPublicKey: []byte{0xff},
+				},
+				Network: pb.Network_REGTEST,
+				Types:   []pb.TransferType{pb.TransferType_TRANSFER},
+			},
+		},
+		// Out-of-range type enum — both paths must reject with InvalidArgument.
+		{
+			"invalid_type_enum_rejected",
+			f.medium,
+			func() *pb.TransferFilter {
+				flt := senderFilter(f.medium)
+				flt.Types = []pb.TransferType{pb.TransferType(99999)}
+				return flt
+			}(),
+		},
+		// nil filter — routing must not panic; both paths fall through to legacy
+		// which rejects with InvalidArgument.
+		{
+			"nil_filter_rejected",
+			f.medium,
+			nil,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			legacy, mimo, lerr, merr := f.runBothPathsAllTransfersByTypes(tc.viewer, tc.filter)
+			assertResultsEquivalent(t, tc.name, legacy, mimo, lerr, merr)
+		})
+	}
+}
+
+// Self-transfer dedup: a transfer where sender == primary receiver must
+// surface exactly once through SR1 + types. The UNION in
+// BuildByTypesQuerySenderOrReceiver collapses the duplicate rows; without
+// DISTINCT the ordered ID comparison would fail.
+func TestQueryAllTransfers_Equivalence_ByTypes_SelfTransfer(t *testing.T) {
+	if !sparktesting.PostgresTestsEnabled() {
+		t.Skip("equivalence tests require Postgres (raw SQL execution path)")
+	}
+	f := newEquivFixture(t)
+
+	self := f.newPubkey()
+	other := f.newPubkey()
+	f.privacyEnabled(self)
+	f.makeTransfer(makeTransferOpts{
+		transferType:   st.TransferTypeTransfer,
+		transferStatus: st.TransferStatusCompleted,
+		receiverStatus: st.TransferReceiverStatusCompleted,
+		sender:         self,
+		receiver:       self,
+		extraReceivers: []extraReceiverEquiv{
+			{pubkey: other, status: st.TransferReceiverStatusCompleted},
+		},
+		createTime: f.baseNow.Add(-30 * time.Minute),
+	})
+
+	filter := withTypes(senderOrReceiverFilter(self), pb.TransferType_TRANSFER)
+	legacy, mimo, lerr, merr := f.runBothPathsAllTransfersByTypes(self, filter)
+	assertResultsEquivalent(t, "self_transfer_dedup", legacy, mimo, lerr, merr)
 }
