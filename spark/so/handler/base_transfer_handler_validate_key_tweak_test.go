@@ -229,3 +229,34 @@ func TestValidateTransferPackage_ExtraKeyTweakForUnknownLeaf(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "key tweak count mismatch")
 }
+
+func TestValidateTransferPackage_RejectsDuplicateEncryptedKeyTweakLeafID(t *testing.T) {
+	cfg := sparktesting.TestConfig(t)
+	rng := rand.NewChaCha8([32]byte{47})
+	senderPrivKey := keys.MustGeneratePrivateKeyFromRand(rng)
+	transferID := uuid.New()
+	leafID := uuid.New()
+
+	keyTweakPackage := buildKeyTweakPackageForLeaves(t, cfg, rng, []uuid.UUID{leafID, leafID})
+
+	pkg := &pb.TransferPackage{
+		LeavesToSend: []*pb.UserSignedTxSigningJob{{
+			LeafId: leafID.String(),
+			RawTx:  createTestTxBytes(t, 1000),
+		}},
+		KeyTweakPackage: keyTweakPackage,
+	}
+	signTransferPackage(t, pkg, transferID, senderPrivKey)
+
+	h := NewBaseTransferHandler(cfg)
+	_, err := h.ValidateTransferPackage(
+		t.Context(),
+		transferID,
+		pkg,
+		senderPrivKey.Public(),
+		false,
+	)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "duplicate leaf id in encrypted key tweaks")
+}
