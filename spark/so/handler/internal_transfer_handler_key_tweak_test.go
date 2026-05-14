@@ -112,6 +112,106 @@ func TestSettleSenderKeyTweak_Commit_EmptyKeyTweak(t *testing.T) {
 	assert.Contains(t, err.Error(), leaf.ID.String())
 }
 
+func TestSettleSenderKeyTweak_Commit_PreimageSwapRequiresSharedPreimage(t *testing.T) {
+	ctx, dbCtx := db.ConnectToTestPostgres(t)
+	cfg := sparktesting.TestConfig(t)
+	rng := rand.NewChaCha8([32]byte{121})
+
+	senderPrivKey := keys.MustGeneratePrivateKeyFromRand(rng)
+	receiverPrivKey := keys.MustGeneratePrivateKeyFromRand(rng)
+	keysharePrivKey := keys.MustGeneratePrivateKeyFromRand(rng)
+	publicSharePrivKey := keys.MustGeneratePrivateKeyFromRand(rng)
+	verifyingPrivKey := keys.MustGeneratePrivateKeyFromRand(rng)
+	ownerSigningPrivKey := keys.MustGeneratePrivateKeyFromRand(rng)
+	client := dbCtx.Client
+
+	signingKeyshare, err := client.SigningKeyshare.Create().
+		SetStatus(st.KeyshareStatusAvailable).
+		SetSecretShare(keysharePrivKey).
+		SetPublicShares(map[string]keys.Public{cfg.Identifier: publicSharePrivKey.Public()}).
+		SetPublicKey(keysharePrivKey.Public()).
+		SetMinSigners(2).
+		SetCoordinatorIndex(0).
+		Save(ctx)
+	require.NoError(t, err)
+
+	tree, err := client.Tree.Create().
+		SetStatus(st.TreeStatusAvailable).
+		SetNetwork(btcnetwork.Regtest).
+		SetOwnerIdentityPubkey(senderPrivKey.Public()).
+		SetBaseTxid(st.NewRandomTxIDForTesting(t)).
+		SetVout(0).
+		Save(ctx)
+	require.NoError(t, err)
+
+	leaf, err := client.TreeNode.Create().
+		SetStatus(st.TreeNodeStatusAvailable).
+		SetTree(tree).
+		SetNetwork(tree.Network).
+		SetSigningKeyshare(signingKeyshare).
+		SetValue(1000).
+		SetVerifyingPubkey(verifyingPrivKey.Public()).
+		SetOwnerIdentityPubkey(senderPrivKey.Public()).
+		SetOwnerSigningPubkey(ownerSigningPrivKey.Public()).
+		SetRawTx(createTestTxBytes(t, 5000)).
+		SetRawRefundTx(createTestTxBytes(t, 5100)).
+		SetVout(0).
+		Save(ctx)
+	require.NoError(t, err)
+
+	transfer, err := client.Transfer.Create().
+		SetNetwork(btcnetwork.Regtest).
+		SetStatus(st.TransferStatusSenderKeyTweakPending).
+		SetType(st.TransferTypePreimageSwap).
+		SetSenderIdentityPubkey(senderPrivKey.Public()).
+		SetReceiverIdentityPubkey(receiverPrivKey.Public()).
+		SetTotalValue(1000).
+		SetExpiryTime(time.Now().Add(24 * time.Hour)).
+		Save(ctx)
+	require.NoError(t, err)
+
+	secretShare, pubkeySharesTweak := createValidSecretShares(cfg, rng)
+	keyTweakBytes, err := proto.Marshal(&sparkProto.SendLeafKeyTweak{
+		LeafId:            leaf.ID.String(),
+		SecretShareTweak:  secretShare,
+		PubkeySharesTweak: pubkeySharesTweak,
+		SecretCipher:      []byte("encrypted-secret-share"),
+		Signature:         []byte("mock-key-tweak-signature"),
+	})
+	require.NoError(t, err)
+
+	transferLeaf, err := client.TransferLeaf.Create().
+		SetTransfer(transfer).
+		SetLeaf(leaf).
+		SetPreviousRefundTx(createTestTxBytes(t, 5200)).
+		SetIntermediateRefundTx(createTestTxBytes(t, 5201)).
+		SetKeyTweak(keyTweakBytes).
+		Save(ctx)
+	require.NoError(t, err)
+
+	_, err = client.PreimageRequest.Create().
+		SetPaymentHash([]byte("waiting_preimage_request_hash__32")).
+		SetStatus(st.PreimageRequestStatusWaitingForPreimage).
+		SetReceiverIdentityPubkey(receiverPrivKey.Public()).
+		SetTransfers(transfer).
+		Save(ctx)
+	require.NoError(t, err)
+
+	handler := NewInternalTransferHandler(cfg)
+	err = handler.SettleSenderKeyTweak(ctx, &pbinternal.SettleSenderKeyTweakRequest{
+		TransferId: transfer.ID.String(),
+		Action:     pbinternal.SettleKeyTweakAction_COMMIT,
+	})
+
+	require.ErrorContains(t, err, "preimage has not been shared")
+	updatedTransfer, err := client.Transfer.Get(ctx, transfer.ID)
+	require.NoError(t, err)
+	assert.Equal(t, st.TransferStatusSenderKeyTweakPending, updatedTransfer.Status)
+	updatedTransferLeaf, err := client.TransferLeaf.Get(ctx, transferLeaf.ID)
+	require.NoError(t, err)
+	assert.NotEmpty(t, updatedTransferLeaf.KeyTweak, "rejected commit must leave sender key tweak material pending")
+}
+
 func TestCommitSenderKeyTweaks_RejectsNilProofValue(t *testing.T) {
 	ctx, dbCtx := db.ConnectToTestPostgres(t)
 	cfg := sparktesting.TestConfig(t)
