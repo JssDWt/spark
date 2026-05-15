@@ -43,6 +43,9 @@ func (h *ReSignSubtreeHandler) ReSignSubtree(
 	ctx context.Context,
 	req *pbssp.ReSignSubtreeRequest,
 ) (*pbssp.ReSignSubtreeResponse, error) {
+	if req == nil {
+		return nil, fmt.Errorf("resign subtree request is required")
+	}
 	db, err := ent.GetDbFromContext(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get db from context: %w", err)
@@ -122,6 +125,9 @@ func (h *ReSignSubtreeHandler) ReSignSubtree(
 		nodeJobs, ok := req.NodeSigningJobs[nodeIDStr]
 		if !ok {
 			return nil, fmt.Errorf("missing signing jobs for node %s", nodeIDStr)
+		}
+		if err := validateReSignSubtreeSigningJobs(nodeIDStr, nodeJobs, expectedReSignSubtreeSigningJobCount(sn), "node"); err != nil {
+			return nil, err
 		}
 
 		keyshare := sn.node.Edges.SigningKeyshare
@@ -256,6 +262,40 @@ func (h *ReSignSubtreeHandler) ReSignSubtree(
 	}, nil
 }
 
+func expectedReSignSubtreeSigningJobCount(sn subtreeNode) int {
+	if sn.isLeaf {
+		return 5
+	}
+	return 1
+}
+
+func validateReSignSubtreeSigningJobs(nodeID string, nodeJobs *pbssp.NodeSigningJobs, expectedCount int, description string) error {
+	target := reSignSubtreeSigningJobTarget(description, nodeID)
+	if nodeJobs == nil {
+		return fmt.Errorf("signing jobs for %s are required", target)
+	}
+	if len(nodeJobs.SigningJobs) != expectedCount {
+		jobWord := "signing jobs"
+		if expectedCount == 1 {
+			jobWord = "signing job"
+		}
+		return fmt.Errorf("%s expects exactly %d %s, got %d", target, expectedCount, jobWord, len(nodeJobs.SigningJobs))
+	}
+	for i, job := range nodeJobs.SigningJobs {
+		if job == nil {
+			return fmt.Errorf("signing job %d for %s is required", i, target)
+		}
+	}
+	return nil
+}
+
+func reSignSubtreeSigningJobTarget(description string, nodeID string) string {
+	if nodeID == "" {
+		return description
+	}
+	return fmt.Sprintf("%s %s", description, nodeID)
+}
+
 func (h *ReSignSubtreeHandler) buildSubtreeNodes(
 	parentNode *ent.TreeNode,
 	leftChainIDs, rightChainIDs []uuid.UUID,
@@ -335,8 +375,8 @@ func (h *ReSignSubtreeHandler) buildSplitTxSigningJobs(
 	children []*ent.TreeNode,
 	nodeJobs *pbssp.NodeSigningJobs,
 ) ([]*helper.SigningJobWithPregeneratedNonce, error) {
-	if len(nodeJobs.SigningJobs) != 1 {
-		return nil, fmt.Errorf("split node expects exactly 1 signing job, got %d", len(nodeJobs.SigningJobs))
+	if err := validateReSignSubtreeSigningJobs("", nodeJobs, 1, "split node"); err != nil {
+		return nil, err
 	}
 
 	userJob := nodeJobs.SigningJobs[0]
@@ -364,8 +404,8 @@ func (h *ReSignSubtreeHandler) buildIntermediateSigningJobs(
 	prevOutput *wire.TxOut,
 	nodeJobs *pbssp.NodeSigningJobs,
 ) ([]*helper.SigningJobWithPregeneratedNonce, error) {
-	if len(nodeJobs.SigningJobs) != 1 {
-		return nil, fmt.Errorf("intermediate node expects exactly 1 signing job, got %d", len(nodeJobs.SigningJobs))
+	if err := validateReSignSubtreeSigningJobs("", nodeJobs, 1, "intermediate node"); err != nil {
+		return nil, err
 	}
 
 	userJob := nodeJobs.SigningJobs[0]
@@ -390,8 +430,8 @@ func (h *ReSignSubtreeHandler) buildLeafSigningJobs(
 	prevOutput *wire.TxOut,
 	nodeJobs *pbssp.NodeSigningJobs,
 ) ([]*helper.SigningJobWithPregeneratedNonce, error) {
-	if len(nodeJobs.SigningJobs) != 5 {
-		return nil, fmt.Errorf("leaf node expects 5 signing jobs, got %d", len(nodeJobs.SigningJobs))
+	if err := validateReSignSubtreeSigningJobs("", nodeJobs, 5, "leaf node"); err != nil {
+		return nil, err
 	}
 
 	var jobs []*helper.SigningJobWithPregeneratedNonce
