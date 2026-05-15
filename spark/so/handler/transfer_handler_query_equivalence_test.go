@@ -1340,7 +1340,6 @@ func (f *equivFixture) ctxForByTypes(viewer keys.Public, mimoKnob float64) conte
 		knobs.KnobPrivacyEnabled:                 100,
 		knobs.KnobReadMIMODataModelQueryByTypes:  mimoKnob,
 		knobs.KnobReadMIMOMultiParticipantFormat: 0,
-		knobs.KnobFilterSSPCounterSwapAsTransfer: 0,
 	}))
 }
 
