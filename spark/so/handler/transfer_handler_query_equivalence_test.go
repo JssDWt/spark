@@ -1101,7 +1101,7 @@ func TestQueryMIMOPendingTransferIDs_NowIsBoundParameter_S1(t *testing.T) {
 	})
 
 	ids, err := queryMIMOPendingTransferIDs(f.ctx, f.client, queryMIMOPendingArgs{
-		participant:  pendingParticipantRoleSender,
+		participant:  participantRoleSender,
 		walletPubkey: sender,
 		network:      pb.Network_REGTEST,
 		order:        pb.Order_DESCENDING,
@@ -1140,7 +1140,7 @@ func TestQueryMIMOPendingTransferIDs_NowIsBoundParameter_SR1(t *testing.T) {
 	})
 
 	ids, err := queryMIMOPendingTransferIDs(f.ctx, f.client, queryMIMOPendingArgs{
-		participant:  pendingParticipantRoleSenderOrReceiver,
+		participant:  participantRoleSenderOrReceiver,
 		walletPubkey: sender,
 		network:      pb.Network_REGTEST,
 		order:        pb.Order_DESCENDING,
@@ -1161,7 +1161,7 @@ func TestQueryMIMOPendingTransferIDs_RequiresNow(t *testing.T) {
 	f := newEquivFixture(t)
 
 	_, err := queryMIMOPendingTransferIDs(f.ctx, f.client, queryMIMOPendingArgs{
-		participant:  pendingParticipantRoleSender,
+		participant:  participantRoleSender,
 		walletPubkey: f.newPubkey(),
 		network:      pb.Network_REGTEST,
 		order:        pb.Order_DESCENDING,
