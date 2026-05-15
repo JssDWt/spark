@@ -243,7 +243,6 @@ func (f *equivFixture) ctxForWallet(viewer keys.Public, mimoKnob float64) contex
 		knobs.KnobPrivacyEnabled:                         100,
 		knobs.KnobReadMIMODataModelQueryPendingTransfers: mimoKnob,
 		knobs.KnobReadMIMOMultiParticipantFormat:         0,
-		knobs.KnobFilterSSPCounterSwapAsTransfer:         0,
 	}))
 }
 
@@ -669,7 +668,6 @@ func TestQueryPendingTransfers_Equivalence_Access_NoSession(t *testing.T) {
 		knobs.KnobPrivacyEnabled:                         100,
 		knobs.KnobReadMIMODataModelQueryPendingTransfers: 0,
 		knobs.KnobReadMIMOMultiParticipantFormat:         0,
-		knobs.KnobFilterSSPCounterSwapAsTransfer:         0,
 	})
 	ctxLegacy := knobs.InjectKnobsService(f.ctx, noSessionKnobs)
 	respLegacy, errLegacy := f.handler.QueryPendingTransfers(ctxLegacy, receiverFilter(f.light))
@@ -678,7 +676,6 @@ func TestQueryPendingTransfers_Equivalence_Access_NoSession(t *testing.T) {
 		knobs.KnobPrivacyEnabled:                         100,
 		knobs.KnobReadMIMODataModelQueryPendingTransfers: 100,
 		knobs.KnobReadMIMOMultiParticipantFormat:         0,
-		knobs.KnobFilterSSPCounterSwapAsTransfer:         0,
 	})
 	ctxMIMO := knobs.InjectKnobsService(f.ctx, mimoKnobs)
 	respMIMO, errMIMO := f.handler.QueryPendingTransfers(ctxMIMO, receiverFilter(f.light))
@@ -1187,7 +1184,6 @@ func (f *equivFixture) ctxForOutgoingInFlight(viewer keys.Public, mimoKnob float
 		knobs.KnobPrivacyEnabled:                    100,
 		knobs.KnobReadMIMODataModelOutgoingInFlight: mimoKnob,
 		knobs.KnobReadMIMOMultiParticipantFormat:    0,
-		knobs.KnobFilterSSPCounterSwapAsTransfer:    0,
 	}))
 }
 
