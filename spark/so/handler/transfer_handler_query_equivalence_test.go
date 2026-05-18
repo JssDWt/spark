@@ -1559,3 +1559,387 @@ func TestQueryAllTransfers_Equivalence_ByTypes_SelfTransfer(t *testing.T) {
 	legacy, mimo, lerr, merr := f.runBothPathsAllTransfersByTypes(self, filter)
 	assertResultsEquivalent(t, "self_transfer_dedup", legacy, mimo, lerr, merr)
 }
+
+// -----------------------------------------------------------------------------
+// QueryAllTransfers equivalence — legacy queryTransfers vs the specialized
+// queryReceiverByTypeStatus path. Covers receiver-arm queries with both type
+// and status filters: SDK getOwnedBalance receiver shape (GOB2), audit Shape
+// A ([SWAP] + 5-state cross-axis), audit Shape B ([COOPERATIVE_EXIT] +
+// 2-sender-pending), partial umbrellas (narrowing must fire), terminals, and
+// fall-through cases that must stay on legacy.
+// -----------------------------------------------------------------------------
+
+func (f *equivFixture) ctxForReceiverByTypeStatus(viewer keys.Public, mimoKnob float64) context.Context {
+	ctx := authn.InjectSessionForTests(f.ctx, hex.EncodeToString(viewer.Serialize()), 9999999999)
+	return knobs.InjectKnobsService(ctx, knobs.NewFixedKnobs(map[string]float64{
+		knobs.KnobPrivacyEnabled:                        100,
+		knobs.KnobReadMIMODataModelReceiverByTypeStatus: mimoKnob,
+		knobs.KnobReadMIMOMultiParticipantFormat:        0,
+	}))
+}
+
+func (f *equivFixture) runBothPathsAllTransfersReceiverByTypeStatus(viewer keys.Public, filter *pb.TransferFilter) (legacyResp, mimoResp *pb.QueryTransfersResponse, legacyErr, mimoErr error) {
+	f.t.Helper()
+	ctxLegacy := f.ctxForReceiverByTypeStatus(viewer, 0)
+	legacyResp, legacyErr = f.handler.QueryAllTransfers(ctxLegacy, filter, false)
+
+	ctxMIMO := f.ctxForReceiverByTypeStatus(viewer, 100)
+	mimoResp, mimoErr = f.handler.QueryAllTransfers(ctxMIMO, filter, false)
+	return legacyResp, mimoResp, legacyErr, mimoErr
+}
+
+func withStatuses(filter *pb.TransferFilter, statuses ...pb.TransferStatus) *pb.TransferFilter {
+	filter.Statuses = statuses
+	return filter
+}
+
+func TestQueryAllTransfers_Equivalence_ReceiverByTypeStatus(t *testing.T) {
+	if !sparktesting.PostgresTestsEnabled() {
+		t.Skip("equivalence tests require Postgres (raw SQL uses pq.Array + ANY)")
+	}
+	f := newEquivFixture(t)
+	f.setupEquivalenceData()
+
+	activeCounterSwap := []pb.TransferStatus{
+		pb.TransferStatus_TRANSFER_STATUS_SENDER_INITIATED,
+		pb.TransferStatus_TRANSFER_STATUS_SENDER_INITIATED_COORDINATOR,
+		pb.TransferStatus_TRANSFER_STATUS_APPLYING_SENDER_KEY_TWEAK,
+		pb.TransferStatus_TRANSFER_STATUS_SENDER_KEY_TWEAK_PENDING,
+		pb.TransferStatus_TRANSFER_STATUS_SENDER_KEY_TWEAKED,
+		pb.TransferStatus_TRANSFER_STATUS_RECEIVER_KEY_TWEAK_LOCKED,
+		pb.TransferStatus_TRANSFER_STATUS_RECEIVER_KEY_TWEAK_APPLIED,
+		pb.TransferStatus_TRANSFER_STATUS_RECEIVER_KEY_TWEAKED,
+		pb.TransferStatus_TRANSFER_STATUS_RECEIVER_REFUND_SIGNED,
+	}
+	counterSwapTypes := []pb.TransferType{pb.TransferType_COUNTER_SWAP_V3, pb.TransferType_COUNTER_SWAP}
+
+	shapeAStatuses := []pb.TransferStatus{
+		pb.TransferStatus_TRANSFER_STATUS_SENDER_KEY_TWEAKED,
+		pb.TransferStatus_TRANSFER_STATUS_RECEIVER_KEY_TWEAKED,
+		pb.TransferStatus_TRANSFER_STATUS_RECEIVER_KEY_TWEAK_LOCKED,
+		pb.TransferStatus_TRANSFER_STATUS_RECEIVER_KEY_TWEAK_APPLIED,
+		pb.TransferStatus_TRANSFER_STATUS_RECEIVER_REFUND_SIGNED,
+	}
+
+	cases := []struct {
+		name   string
+		viewer keys.Public
+		filter *pb.TransferFilter
+	}{
+		// GOB2 shape — SDK getOwnedBalance receiver arm. Routes to new handler.
+		// 2 types × 2 buckets = 4 sub-queries; narrowing predicate covers the
+		// 4 sender-pending umbrella.
+		{
+			"GOB2_full_active_counter_swap",
+			f.medium,
+			withStatuses(withTypes(receiverFilter(f.medium), counterSwapTypes...), activeCounterSwap...),
+		},
+		{
+			"GOB2_full_active_counter_swap_light",
+			f.light,
+			withStatuses(withTypes(receiverFilter(f.light), counterSwapTypes...), activeCounterSwap...),
+		},
+		// Shape A — [SWAP] + SENDER_KEY_TWEAKED + 4 RECEIVER_*. All 5 statuses
+		// translate 1:1 (no narrowing needed), all land in
+		// idx_transferreceiver_claim_pending_pubkey_time's partial WHERE —
+		// postTweakActive bucket only.
+		{
+			"shapeA_swap_receiver_pending",
+			f.medium,
+			withStatuses(withTypes(receiverFilter(f.medium), pb.TransferType_SWAP), shapeAStatuses...),
+		},
+		// Shape B — [COOPERATIVE_EXIT] + 2 sender-pending. Translates to
+		// INITIATED only; narrowing carries the 2 t.status values for exactness.
+		// remainder bucket only.
+		{
+			"shapeB_coop_exit_partial_sender_pending",
+			f.medium,
+			withStatuses(withTypes(receiverFilter(f.medium), pb.TransferType_COOPERATIVE_EXIT),
+				pb.TransferStatus_TRANSFER_STATUS_SENDER_INITIATED,
+				pb.TransferStatus_TRANSFER_STATUS_SENDER_KEY_TWEAK_PENDING),
+		},
+		// Single receiver-named status — drives postTweakActive bucket only, 1:1
+		// translation, no narrowing.
+		{
+			"single_receiver_key_tweaked",
+			f.medium,
+			withStatuses(withTypes(receiverFilter(f.medium), pb.TransferType_TRANSFER),
+				pb.TransferStatus_TRANSFER_STATUS_RECEIVER_KEY_TWEAKED),
+		},
+		// Terminal-only — COMPLETED translates 1:1, REMAINDER bucket via type
+		// composite.
+		{
+			"terminal_completed_only",
+			f.medium,
+			withStatuses(withTypes(receiverFilter(f.medium), pb.TransferType_TRANSFER),
+				pb.TransferStatus_TRANSFER_STATUS_COMPLETED),
+		},
+		// Mixed terminal + receiver-named — both buckets fire.
+		{
+			"mixed_completed_plus_receiver_tweaked",
+			f.medium,
+			withStatuses(withTypes(receiverFilter(f.medium), pb.TransferType_TRANSFER),
+				pb.TransferStatus_TRANSFER_STATUS_COMPLETED,
+				pb.TransferStatus_TRANSFER_STATUS_RECEIVER_KEY_TWEAKED),
+		},
+		// No matches on this wallet — empty result, both paths agree.
+		{
+			"receiver_no_matches",
+			f.cold,
+			withStatuses(withTypes(receiverFilter(f.cold), counterSwapTypes...), activeCounterSwap...),
+		},
+		// ORDER ASCENDING — exercises backwards walk on indexes.
+		{
+			"order_ascending",
+			f.medium,
+			withOrder(withStatuses(withTypes(receiverFilter(f.medium), pb.TransferType_TRANSFER),
+				pb.TransferStatus_TRANSFER_STATUS_RECEIVER_KEY_TWEAKED), pb.Order_ASCENDING),
+		},
+		// Pagination.
+		{
+			"pagination_limit_offset",
+			f.medium,
+			withLimitOffset(withStatuses(withTypes(receiverFilter(f.medium), pb.TransferType_TRANSFER),
+				pb.TransferStatus_TRANSFER_STATUS_RECEIVER_KEY_TWEAKED), 5, 1),
+		},
+		// Time filters.
+		{
+			"created_after",
+			f.medium,
+			withCreatedAfter(withStatuses(withTypes(receiverFilter(f.medium), pb.TransferType_TRANSFER),
+				pb.TransferStatus_TRANSFER_STATUS_RECEIVER_KEY_TWEAKED), f.baseNow.Add(-150*time.Minute)),
+		},
+		{
+			"created_before",
+			f.medium,
+			withCreatedBefore(withStatuses(withTypes(receiverFilter(f.medium), pb.TransferType_TRANSFER),
+				pb.TransferStatus_TRANSFER_STATUS_RECEIVER_KEY_TWEAKED), f.baseNow.Add(-150*time.Minute)),
+		},
+		// Duplicate types — the per-type rewrite must dedupe.
+		{
+			"duplicate_types_deduped",
+			f.medium,
+			withStatuses(withTypes(receiverFilter(f.medium),
+				pb.TransferType_COUNTER_SWAP, pb.TransferType_COUNTER_SWAP, pb.TransferType_COUNTER_SWAP_V3),
+				pb.TransferStatus_TRANSFER_STATUS_RECEIVER_KEY_TWEAKED),
+		},
+		// Fall-through: sender participant — predicate requires receiver.
+		{
+			"falls_through_when_sender_participant",
+			f.sender,
+			withStatuses(withTypes(senderFilter(f.sender), counterSwapTypes...), activeCounterSwap...),
+		},
+		// Fall-through: SR1 participant.
+		{
+			"falls_through_when_SR1_participant",
+			f.both,
+			withStatuses(withTypes(senderOrReceiverFilter(f.both), counterSwapTypes...), activeCounterSwap...),
+		},
+		// Fall-through: no types.
+		{
+			"falls_through_when_no_types",
+			f.medium,
+			withStatuses(receiverFilter(f.medium), pb.TransferStatus_TRANSFER_STATUS_RECEIVER_KEY_TWEAKED),
+		},
+		// Fall-through: no statuses.
+		{
+			"falls_through_when_no_statuses",
+			f.medium,
+			withTypes(receiverFilter(f.medium), pb.TransferType_TRANSFER),
+		},
+		// Fall-through: transfer_ids set.
+		{
+			"falls_through_when_transfer_ids_set",
+			f.light,
+			withTransferIDs(withStatuses(withTypes(receiverFilter(f.light), pb.TransferType_TRANSFER),
+				pb.TransferStatus_TRANSFER_STATUS_RECEIVER_KEY_TWEAKED), uuid.New().String()),
+		},
+		// Negative pagination — both paths must reject.
+		{
+			"negative_limit_rejected",
+			f.medium,
+			withLimitOffset(withStatuses(withTypes(receiverFilter(f.medium), counterSwapTypes...),
+				activeCounterSwap...), -1, 0),
+		},
+		{
+			"negative_offset_rejected",
+			f.medium,
+			withLimitOffset(withStatuses(withTypes(receiverFilter(f.medium), counterSwapTypes...),
+				activeCounterSwap...), 50, -1),
+		},
+		// Out-of-range status enum — both paths must reject.
+		{
+			"invalid_status_enum_rejected",
+			f.medium,
+			withStatuses(withTypes(receiverFilter(f.medium), pb.TransferType_TRANSFER), pb.TransferStatus(99999)),
+		},
+		// nil filter — routing must not panic.
+		{
+			"nil_filter_rejected",
+			f.medium,
+			nil,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			legacy, mimo, lerr, merr := f.runBothPathsAllTransfersReceiverByTypeStatus(tc.viewer, tc.filter)
+			assertResultsEquivalent(t, tc.name, legacy, mimo, lerr, merr)
+		})
+	}
+}
+
+// Self-transfer: receiver-arm-only handler must marshal via
+// MarshalProtoForReceiver when the wallet is also the sender (HasReceiver
+// branch). Multi-receiver self-transfer is the discriminator.
+func TestQueryAllTransfers_Equivalence_ReceiverByTypeStatus_SelfTransfer(t *testing.T) {
+	if !sparktesting.PostgresTestsEnabled() {
+		t.Skip("equivalence tests require Postgres (raw SQL execution path)")
+	}
+	f := newEquivFixture(t)
+
+	self := f.newPubkey()
+	other := f.newPubkey()
+	f.privacyEnabled(self)
+	f.makeTransfer(makeTransferOpts{
+		transferType:   st.TransferTypeCounterSwap,
+		transferStatus: st.TransferStatusReceiverKeyTweaked,
+		receiverStatus: st.TransferReceiverStatusKeyTweaked,
+		sender:         self,
+		receiver:       self,
+		extraReceivers: []extraReceiverEquiv{
+			{pubkey: other, status: st.TransferReceiverStatusKeyTweaked},
+		},
+		createTime: f.baseNow.Add(-30 * time.Minute),
+	})
+
+	filter := withStatuses(
+		withTypes(receiverFilter(self), pb.TransferType_COUNTER_SWAP),
+		pb.TransferStatus_TRANSFER_STATUS_RECEIVER_KEY_TWEAKED,
+	)
+	legacy, mimo, lerr, merr := f.runBothPathsAllTransfersReceiverByTypeStatus(self, filter)
+	assertResultsEquivalent(t, "self_transfer_receiver_by_type_status", legacy, mimo, lerr, merr)
+}
+
+// Locks the MIMO-forward receiver-axis semantics: a multi-receiver transfer
+// where one receiver row is COMPLETED while the parent transfers.status (and
+// the other receiver) lags behind must still surface for the COMPLETED
+// receiver when queried with statuses=[COMPLETED]. The pure-1:1 sub-query
+// filters on r.status without a t.status narrowing predicate by design —
+// per-receiver state is the authoritative axis for receiver-arm queries, and
+// legacy queryTransfers' t.status-only filter would silently drop this row.
+// This is a documented divergence from legacy, not an equivalence concern.
+func TestQueryAllTransfers_ReceiverByTypeStatus_PerReceiverCompletedDivergence(t *testing.T) {
+	if !sparktesting.PostgresTestsEnabled() {
+		t.Skip("requires Postgres (raw SQL execution path)")
+	}
+	f := newEquivFixture(t)
+
+	completedReceiver := f.newPubkey()
+	pendingReceiver := f.newPubkey()
+	sender := f.newPubkey()
+	f.privacyEnabled(completedReceiver)
+
+	transfer := f.makeTransfer(makeTransferOpts{
+		transferType:   st.TransferTypeTransfer,
+		transferStatus: st.TransferStatusReceiverRefundSigned,
+		receiverStatus: st.TransferReceiverStatusCompleted,
+		sender:         sender,
+		receiver:       completedReceiver,
+		extraReceivers: []extraReceiverEquiv{
+			{pubkey: pendingReceiver, status: st.TransferReceiverStatusRefundSigned},
+		},
+		createTime: f.baseNow.Add(-30 * time.Minute),
+	})
+
+	filter := withStatuses(
+		withTypes(receiverFilter(completedReceiver), pb.TransferType_TRANSFER),
+		pb.TransferStatus_TRANSFER_STATUS_COMPLETED,
+	)
+	ctx := f.ctxForReceiverByTypeStatus(completedReceiver, 100)
+	resp, err := f.handler.QueryAllTransfers(ctx, filter, false)
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+	require.Len(t, resp.Transfers, 1, "completed receiver should see the transfer despite parent t.status != COMPLETED")
+	assert.Equal(t, transfer.ID.String(), resp.Transfers[0].Id)
+}
+
+// TestQueryAllTransfers_ReceiverByTypeStatus_PerReceiverPostTweakDivergence
+// locks the receiver-axis semantics for the remaining post-tweak r.statuses
+// beyond COMPLETED. The marquee COMPLETED case lives above; this table
+// extends the class to KEY_TWEAKED, KEY_TWEAK_LOCKED, and REFUND_SIGNED so a
+// future "fix" that re-adds a t.status narrowing predicate to the pure
+// sub-query — for any of these statuses — breaks the test instead of
+// silently dropping rows from prod.
+//
+// Each case constructs a multi-receiver transfer where the queried receiver
+// is one stage ahead of the parent t.status, the other receiver still lags,
+// then verifies the receiver-axis filter returns the transfer.
+func TestQueryAllTransfers_ReceiverByTypeStatus_PerReceiverPostTweakDivergence(t *testing.T) {
+	if !sparktesting.PostgresTestsEnabled() {
+		t.Skip("requires Postgres (raw SQL execution path)")
+	}
+
+	cases := []struct {
+		name          string
+		parentStatus  st.TransferStatus
+		queriedStatus st.TransferReceiverStatus
+		laggingStatus st.TransferReceiverStatus
+		filterStatus  pb.TransferStatus
+	}{
+		{
+			name:          "key_tweaked_ahead_of_sender_key_tweaked_parent",
+			parentStatus:  st.TransferStatusSenderKeyTweaked,
+			queriedStatus: st.TransferReceiverStatusKeyTweaked,
+			laggingStatus: st.TransferReceiverStatusReceiverClaimPending,
+			filterStatus:  pb.TransferStatus_TRANSFER_STATUS_RECEIVER_KEY_TWEAKED,
+		},
+		{
+			name:          "key_tweak_locked_ahead_of_receiver_key_tweaked_parent",
+			parentStatus:  st.TransferStatusReceiverKeyTweaked,
+			queriedStatus: st.TransferReceiverStatusKeyTweakLocked,
+			laggingStatus: st.TransferReceiverStatusKeyTweaked,
+			filterStatus:  pb.TransferStatus_TRANSFER_STATUS_RECEIVER_KEY_TWEAK_LOCKED,
+		},
+		{
+			name:          "refund_signed_ahead_of_receiver_key_tweak_applied_parent",
+			parentStatus:  st.TransferStatusReceiverKeyTweakApplied,
+			queriedStatus: st.TransferReceiverStatusRefundSigned,
+			laggingStatus: st.TransferReceiverStatusKeyTweakApplied,
+			filterStatus:  pb.TransferStatus_TRANSFER_STATUS_RECEIVER_REFUND_SIGNED,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newEquivFixture(t)
+			advancedReceiver := f.newPubkey()
+			laggingReceiver := f.newPubkey()
+			sender := f.newPubkey()
+			f.privacyEnabled(advancedReceiver)
+
+			transfer := f.makeTransfer(makeTransferOpts{
+				transferType:   st.TransferTypeTransfer,
+				transferStatus: tc.parentStatus,
+				receiverStatus: tc.queriedStatus,
+				sender:         sender,
+				receiver:       advancedReceiver,
+				extraReceivers: []extraReceiverEquiv{
+					{pubkey: laggingReceiver, status: tc.laggingStatus},
+				},
+				createTime: f.baseNow.Add(-30 * time.Minute),
+			})
+
+			filter := withStatuses(
+				withTypes(receiverFilter(advancedReceiver), pb.TransferType_TRANSFER),
+				tc.filterStatus,
+			)
+			ctx := f.ctxForReceiverByTypeStatus(advancedReceiver, 100)
+			resp, err := f.handler.QueryAllTransfers(ctx, filter, false)
+			require.NoError(t, err)
+			require.NotNil(t, resp)
+			require.Len(t, resp.Transfers, 1, "advanced receiver should see the transfer despite lagging parent t.status")
+			assert.Equal(t, transfer.ID.String(), resp.Transfers[0].Id)
+		})
+	}
+}
