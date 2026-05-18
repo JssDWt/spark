@@ -3,14 +3,17 @@
 package handler
 
 import (
+	"math/big"
 	"math/rand/v2"
 	"testing"
 	"time"
 
+	"github.com/decred/dcrd/dcrec/secp256k1/v4"
 	"github.com/stretchr/testify/require"
 
 	"github.com/lightsparkdev/spark/common/btcnetwork"
 	"github.com/lightsparkdev/spark/common/keys"
+	secretsharing "github.com/lightsparkdev/spark/common/secret_sharing"
 	pb "github.com/lightsparkdev/spark/proto/spark"
 	pbssp "github.com/lightsparkdev/spark/proto/spark_ssp_internal"
 	"github.com/lightsparkdev/spark/so"
@@ -18,6 +21,7 @@ import (
 	"github.com/lightsparkdev/spark/so/ent"
 	st "github.com/lightsparkdev/spark/so/ent/schema/schematype"
 	enttransfer "github.com/lightsparkdev/spark/so/ent/transfer"
+	sparktesting "github.com/lightsparkdev/spark/testing"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -44,16 +48,23 @@ func TestApplySenderKeyTweaks_RecoversApplyingSenderKeyTweak(t *testing.T) {
 		Save(ctx)
 	require.NoError(t, err)
 
+	// commitSenderKeyTweaks -> helper.TweakLeafKeyUpdate now validates
+	// pubkey_shares_tweak against the full cluster's operator map (#6867),
+	// so this test needs the real test-cluster config rather than a
+	// hand-rolled stub. The leaf's key tweak is built with valid
+	// polynomial-derived pubshares for every operator in that config.
+	cfg := sparktesting.TestConfig(t)
+
 	_, err = dbTx.TransferLeaf.Create().
 		SetTransfer(transfer).
 		SetLeaf(leaf.node).
-		SetKeyTweak(mustMarshalSimpleSendLeafKeyTweak(t, rng, leaf.node.ID.String())).
+		SetKeyTweak(mustMarshalSimpleSendLeafKeyTweak(t, rng, leaf.node.ID.String(), cfg)).
 		SetPreviousRefundTx(leaf.node.RawRefundTx).
 		SetIntermediateRefundTx(leaf.node.RawRefundTx).
 		Save(ctx)
 	require.NoError(t, err)
 
-	sspHandler := NewSspRequestHandler(&so.Config{Identifier: "test-operator"})
+	sspHandler := NewSspRequestHandler(cfg)
 	resp, err := sspHandler.ApplySenderKeyTweaks(ctx, &pbssp.ApplySenderKeyTweaksRequest{
 		TransferIds: []string{transfer.ID.String()},
 	})
@@ -81,23 +92,34 @@ func TestApplySenderKeyTweaks_RecoversApplyingSenderKeyTweak(t *testing.T) {
 	require.NotEqual(t, originalOwnerSigningPubkey, updatedNode.OwnerSigningPubkey)
 }
 
-func mustMarshalSimpleSendLeafKeyTweak(t *testing.T, rng *rand.ChaCha8, leafID string) []byte {
+func mustMarshalSimpleSendLeafKeyTweak(t *testing.T, rng *rand.ChaCha8, leafID string, cfg *so.Config) []byte {
 	t.Helper()
 
+	// Degree-0 polynomial g(x) = sharePriv. Every operator evaluates to
+	// the same point sharePriv.Public(), which is what
+	// helper.ValidatePubkeySharesTweak expects when Proofs = [sharePub].
 	sharePriv := keys.MustGeneratePrivateKeyFromRand(rng)
-	pubShareTweak := keys.MustGeneratePrivateKeyFromRand(rng).Public()
+	proofs := [][]byte{sharePriv.Public().Serialize()}
+
+	fieldModulus := secp256k1.S256().N
+	pubkeySharesTweak := make(map[string][]byte, len(cfg.SigningOperatorMap))
+	for identifier, operator := range cfg.SigningOperatorMap {
+		index := new(big.Int).SetUint64(operator.ID)
+		index.Add(index, big.NewInt(1))
+		pub, err := secretsharing.EvaluatePolynomialCommitment(proofs, index, fieldModulus)
+		require.NoError(t, err)
+		pubkeySharesTweak[identifier] = pub.Serialize()
+	}
 
 	keyTweakBinary, err := proto.Marshal(&pb.SendLeafKeyTweak{
 		LeafId: leafID,
 		SecretShareTweak: &pb.SecretShare{
 			SecretShare: sharePriv.Serialize(),
-			Proofs:      [][]byte{sharePriv.Public().Serialize()},
+			Proofs:      proofs,
 		},
-		PubkeySharesTweak: map[string][]byte{
-			"1": pubShareTweak.Serialize(),
-		},
-		SecretCipher: []byte("valid-secret-cipher"),
-		Signature:    []byte("valid-signature"),
+		PubkeySharesTweak: pubkeySharesTweak,
+		SecretCipher:      []byte("valid-secret-cipher"),
+		Signature:         []byte("valid-signature"),
 	})
 	require.NoError(t, err)
 	return keyTweakBinary
