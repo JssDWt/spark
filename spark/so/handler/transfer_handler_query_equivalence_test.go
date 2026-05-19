@@ -1943,3 +1943,273 @@ func TestQueryAllTransfers_ReceiverByTypeStatus_PerReceiverPostTweakDivergence(t
 		})
 	}
 }
+
+func (f *equivFixture) ctxForCounterSwap(viewer keys.Public, mimoKnob float64) context.Context {
+	ctx := authn.InjectSessionForTests(f.ctx, hex.EncodeToString(viewer.Serialize()), 9999999999)
+	return knobs.InjectKnobsService(ctx, knobs.NewFixedKnobs(map[string]float64{
+		knobs.KnobPrivacyEnabled:                 100,
+		knobs.KnobReadMIMODataModelCounterSwap:   mimoKnob,
+		knobs.KnobReadMIMOMultiParticipantFormat: 0,
+	}))
+}
+
+func (f *equivFixture) runBothPathsAllTransfersCounterSwap(viewer keys.Public, filter *pb.TransferFilter) (legacyResp, mimoResp *pb.QueryTransfersResponse, legacyErr, mimoErr error) {
+	f.t.Helper()
+	ctxLegacy := f.ctxForCounterSwap(viewer, 0)
+	legacyResp, legacyErr = f.handler.QueryAllTransfers(ctxLegacy, filter, false)
+
+	ctxMIMO := f.ctxForCounterSwap(viewer, 100)
+	mimoResp, mimoErr = f.handler.QueryAllTransfers(ctxMIMO, filter, false)
+	return legacyResp, mimoResp, legacyErr, mimoErr
+}
+
+// TestQueryAllTransfers_Equivalence_CounterSwap covers the queryCounterSwap
+// handler — sender-or-receiver participant + counter-swap types + a status
+// filter that's a subset of ACTIVE_COUNTER_SWAP_STATUSES. The asymmetric
+// design (sender column-based per-status UNION ALL; receiver edge-based
+// per-type × per-bucket) must produce results equivalent to legacy
+// queryTransfers across all routing-eligible shapes, AND fall through to
+// legacy cleanly for shapes the routing predicate rejects.
+func TestQueryAllTransfers_Equivalence_CounterSwap(t *testing.T) {
+	if !sparktesting.PostgresTestsEnabled() {
+		t.Skip("equivalence tests require Postgres (raw SQL uses pq.Array + ANY)")
+	}
+	f := newEquivFixture(t)
+	f.setupEquivalenceData()
+
+	activeCounterSwap := []pb.TransferStatus{
+		pb.TransferStatus_TRANSFER_STATUS_SENDER_INITIATED,
+		pb.TransferStatus_TRANSFER_STATUS_SENDER_INITIATED_COORDINATOR,
+		pb.TransferStatus_TRANSFER_STATUS_APPLYING_SENDER_KEY_TWEAK,
+		pb.TransferStatus_TRANSFER_STATUS_SENDER_KEY_TWEAK_PENDING,
+		pb.TransferStatus_TRANSFER_STATUS_SENDER_KEY_TWEAKED,
+		pb.TransferStatus_TRANSFER_STATUS_RECEIVER_KEY_TWEAK_LOCKED,
+		pb.TransferStatus_TRANSFER_STATUS_RECEIVER_KEY_TWEAK_APPLIED,
+		pb.TransferStatus_TRANSFER_STATUS_RECEIVER_KEY_TWEAKED,
+		pb.TransferStatus_TRANSFER_STATUS_RECEIVER_REFUND_SIGNED,
+	}
+	counterSwapTypes := []pb.TransferType{pb.TransferType_COUNTER_SWAP_V3, pb.TransferType_COUNTER_SWAP}
+
+	cases := []struct {
+		name   string
+		viewer keys.Public
+		filter *pb.TransferFilter
+	}{
+		// SDK shape — sender_or_receiver + 2 counter-swap types + 9 active statuses.
+		// Triggers narrowing-redundancy optimization (all 4 sender-pending present).
+		{
+			"SDK_full_active_counter_swap_both_arms",
+			f.both,
+			withStatuses(withTypes(senderOrReceiverFilter(f.both), counterSwapTypes...), activeCounterSwap...),
+		},
+		{
+			"SDK_full_active_counter_swap_medium",
+			f.medium,
+			withStatuses(withTypes(senderOrReceiverFilter(f.medium), counterSwapTypes...), activeCounterSwap...),
+		},
+		{
+			"SDK_full_active_counter_swap_light",
+			f.light,
+			withStatuses(withTypes(senderOrReceiverFilter(f.light), counterSwapTypes...), activeCounterSwap...),
+		},
+		// Cold pubkey — empty result; both paths agree on zero rows.
+		{
+			"SDK_full_no_matches_on_cold_pubkey",
+			f.cold,
+			withStatuses(withTypes(senderOrReceiverFilter(f.cold), counterSwapTypes...), activeCounterSwap...),
+		},
+		// Single COUNTER_SWAP type — exercises only one branch of the per-type
+		// UNION ALL on the receiver arm.
+		{
+			"single_type_counter_swap_v1",
+			f.both,
+			withStatuses(withTypes(senderOrReceiverFilter(f.both), pb.TransferType_COUNTER_SWAP), activeCounterSwap...),
+		},
+		// Partial-umbrella subset — only 1 of the 4 sender-pending statuses.
+		// Narrowing-redundancy does NOT fire; the collapsing-remainder
+		// sub-query KEEPS the t.status narrowing predicate for correctness.
+		// Both paths must still agree.
+		{
+			"partial_umbrella_single_sender_pending",
+			f.both,
+			withStatuses(withTypes(senderOrReceiverFilter(f.both), counterSwapTypes...),
+				pb.TransferStatus_TRANSFER_STATUS_SENDER_INITIATED),
+		},
+		// Partial-umbrella with no sender-pending statuses — exercises only
+		// the receiver pure-postTweakActive bucket; no collapsing class at all.
+		{
+			"partial_no_sender_pending",
+			f.medium,
+			withStatuses(withTypes(senderOrReceiverFilter(f.medium), counterSwapTypes...),
+				pb.TransferStatus_TRANSFER_STATUS_RECEIVER_KEY_TWEAKED,
+				pb.TransferStatus_TRANSFER_STATUS_RECEIVER_KEY_TWEAK_LOCKED),
+		},
+		// Single receiver-named status — drives pure-postTweakActive only.
+		{
+			"single_receiver_key_tweaked",
+			f.medium,
+			withStatuses(withTypes(senderOrReceiverFilter(f.medium), counterSwapTypes...),
+				pb.TransferStatus_TRANSFER_STATUS_RECEIVER_KEY_TWEAKED),
+		},
+		// ORDER ASCENDING — exercises backwards walk on indexes via Merge Append.
+		{
+			"order_ascending",
+			f.both,
+			withOrder(withStatuses(withTypes(senderOrReceiverFilter(f.both), counterSwapTypes...),
+				activeCounterSwap...), pb.Order_ASCENDING),
+		},
+		// Pagination.
+		{
+			"pagination_limit_offset",
+			f.both,
+			withLimitOffset(withStatuses(withTypes(senderOrReceiverFilter(f.both), counterSwapTypes...),
+				activeCounterSwap...), 5, 1),
+		},
+		// Time filters.
+		{
+			"created_after",
+			f.medium,
+			withCreatedAfter(withStatuses(withTypes(senderOrReceiverFilter(f.medium), counterSwapTypes...),
+				activeCounterSwap...), f.baseNow.Add(-150*time.Minute)),
+		},
+		{
+			"created_before",
+			f.medium,
+			withCreatedBefore(withStatuses(withTypes(senderOrReceiverFilter(f.medium), counterSwapTypes...),
+				activeCounterSwap...), f.baseNow.Add(-150*time.Minute)),
+		},
+		// Duplicate types — type dedupe inside resolveTypeStrings.
+		{
+			"duplicate_types_deduped",
+			f.both,
+			withStatuses(withTypes(senderOrReceiverFilter(f.both),
+				pb.TransferType_COUNTER_SWAP, pb.TransferType_COUNTER_SWAP, pb.TransferType_COUNTER_SWAP_V3),
+				activeCounterSwap...),
+		},
+		// Fall-through: sender-only participant — routes to legacy.
+		{
+			"falls_through_when_sender_only_participant",
+			f.sender,
+			withStatuses(withTypes(senderFilter(f.sender), counterSwapTypes...), activeCounterSwap...),
+		},
+		// Fall-through: receiver-only participant — routes to #6825's handler
+		// when its knob is on, or legacy when off (we leave it off via the ctx).
+		{
+			"falls_through_when_receiver_only_participant",
+			f.medium,
+			withStatuses(withTypes(receiverFilter(f.medium), counterSwapTypes...), activeCounterSwap...),
+		},
+		// Fall-through: non-counter-swap type — routes to legacy (or #6825 if its
+		// knob is on; we leave it off).
+		{
+			"falls_through_when_type_not_counter_swap",
+			f.medium,
+			withStatuses(withTypes(senderOrReceiverFilter(f.medium), pb.TransferType_TRANSFER),
+				activeCounterSwap...),
+		},
+		// Fall-through: mixed types (one counter-swap + one not) — entire
+		// request rejected since not all types are counter-swap.
+		{
+			"falls_through_when_mixed_type_set",
+			f.medium,
+			withStatuses(withTypes(senderOrReceiverFilter(f.medium),
+				pb.TransferType_COUNTER_SWAP, pb.TransferType_TRANSFER), activeCounterSwap...),
+		},
+		// Fall-through: no statuses.
+		{
+			"falls_through_when_no_statuses",
+			f.medium,
+			withTypes(senderOrReceiverFilter(f.medium), counterSwapTypes...),
+		},
+		// Fall-through: no types.
+		{
+			"falls_through_when_no_types",
+			f.medium,
+			withStatuses(senderOrReceiverFilter(f.medium), activeCounterSwap...),
+		},
+		// Fall-through: transfer_ids set.
+		{
+			"falls_through_when_transfer_ids_set",
+			f.light,
+			withTransferIDs(withStatuses(withTypes(senderOrReceiverFilter(f.light), counterSwapTypes...),
+				activeCounterSwap...), uuid.New().String()),
+		},
+		// Negative pagination — both paths must reject.
+		{
+			"negative_limit_rejected",
+			f.medium,
+			withLimitOffset(withStatuses(withTypes(senderOrReceiverFilter(f.medium), counterSwapTypes...),
+				activeCounterSwap...), -1, 0),
+		},
+		{
+			"negative_offset_rejected",
+			f.medium,
+			withLimitOffset(withStatuses(withTypes(senderOrReceiverFilter(f.medium), counterSwapTypes...),
+				activeCounterSwap...), 50, -1),
+		},
+		// Out-of-range status enum — both paths must reject.
+		{
+			"invalid_status_enum_rejected",
+			f.medium,
+			withStatuses(withTypes(senderOrReceiverFilter(f.medium), counterSwapTypes...),
+				pb.TransferStatus(99999)),
+		},
+		// nil filter — routing must not panic.
+		{
+			"nil_filter_rejected",
+			f.medium,
+			nil,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			legacy, mimo, lerr, merr := f.runBothPathsAllTransfersCounterSwap(tc.viewer, tc.filter)
+			assertResultsEquivalent(t, tc.name, legacy, mimo, lerr, merr)
+		})
+	}
+}
+
+// TestQueryAllTransfers_Equivalence_CounterSwap_SelfTransfer exercises the
+// cross-arm UNION DISTINCT — the wallet is both sender and receiver of the
+// same transfer; outer dedup must collapse the duplicate row.
+func TestQueryAllTransfers_Equivalence_CounterSwap_SelfTransfer(t *testing.T) {
+	if !sparktesting.PostgresTestsEnabled() {
+		t.Skip("equivalence tests require Postgres (raw SQL execution path)")
+	}
+	f := newEquivFixture(t)
+
+	self := f.newPubkey()
+	other := f.newPubkey()
+	f.privacyEnabled(self)
+	f.makeTransfer(makeTransferOpts{
+		transferType:   st.TransferTypeCounterSwap,
+		transferStatus: st.TransferStatusReceiverKeyTweaked,
+		receiverStatus: st.TransferReceiverStatusKeyTweaked,
+		sender:         self,
+		receiver:       self,
+		extraReceivers: []extraReceiverEquiv{
+			{pubkey: other, status: st.TransferReceiverStatusKeyTweaked},
+		},
+		createTime: f.baseNow.Add(-30 * time.Minute),
+	})
+
+	activeCounterSwap := []pb.TransferStatus{
+		pb.TransferStatus_TRANSFER_STATUS_SENDER_INITIATED,
+		pb.TransferStatus_TRANSFER_STATUS_SENDER_INITIATED_COORDINATOR,
+		pb.TransferStatus_TRANSFER_STATUS_APPLYING_SENDER_KEY_TWEAK,
+		pb.TransferStatus_TRANSFER_STATUS_SENDER_KEY_TWEAK_PENDING,
+		pb.TransferStatus_TRANSFER_STATUS_SENDER_KEY_TWEAKED,
+		pb.TransferStatus_TRANSFER_STATUS_RECEIVER_KEY_TWEAK_LOCKED,
+		pb.TransferStatus_TRANSFER_STATUS_RECEIVER_KEY_TWEAK_APPLIED,
+		pb.TransferStatus_TRANSFER_STATUS_RECEIVER_KEY_TWEAKED,
+		pb.TransferStatus_TRANSFER_STATUS_RECEIVER_REFUND_SIGNED,
+	}
+	filter := withStatuses(
+		withTypes(senderOrReceiverFilter(self),
+			pb.TransferType_COUNTER_SWAP, pb.TransferType_COUNTER_SWAP_V3),
+		activeCounterSwap...,
+	)
+	legacy, mimo, lerr, merr := f.runBothPathsAllTransfersCounterSwap(self, filter)
+	assertResultsEquivalent(t, "self_transfer_counter_swap", legacy, mimo, lerr, merr)
+}
