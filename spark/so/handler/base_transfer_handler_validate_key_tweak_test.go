@@ -230,6 +230,86 @@ func TestValidateTransferPackage_ExtraKeyTweakForUnknownLeaf(t *testing.T) {
 	assert.Contains(t, err.Error(), "key tweak count mismatch")
 }
 
+// buildKeyTweakPackageWithMismatchedPubkey builds a TransferPackage.KeyTweakPackage
+// where PubkeySharesTweak for the SO's own identifier is set to a random key.
+// The remaining payload is valid, so the failure isolates the cross-verification check.
+func buildKeyTweakPackageWithMismatchedPubkey(
+	t *testing.T,
+	cfg *so.Config,
+	rng *rand.ChaCha8,
+	tweakedLeafIDs []uuid.UUID,
+) map[string][]byte {
+	t.Helper()
+
+	var leafTweaks []*pb.SendLeafKeyTweak
+	for _, leafID := range tweakedLeafIDs {
+		secretShare, pubkeySharesTweak := createValidSecretShares(cfg, rng)
+
+		wrongKey := keys.MustGeneratePrivateKeyFromRand(rng)
+		pubkeySharesTweak[cfg.Identifier] = wrongKey.Public().Serialize()
+
+		publicKey, err := eciesgo.NewPublicKeyFromBytes(cfg.IdentityPublicKey().Serialize())
+		require.NoError(t, err)
+		secretCipher, err := eciesgo.Encrypt(publicKey, secretShare.GetSecretShare())
+		require.NoError(t, err)
+
+		leafTweaks = append(leafTweaks, &pb.SendLeafKeyTweak{
+			LeafId:            leafID.String(),
+			SecretShareTweak:  secretShare,
+			PubkeySharesTweak: pubkeySharesTweak,
+			SecretCipher:      secretCipher,
+			Signature:         []byte("mock_signature_for_testing"),
+		})
+	}
+
+	publicKey, err := eciesgo.NewPublicKeyFromBytes(cfg.IdentityPublicKey().Serialize())
+	require.NoError(t, err)
+
+	leafTweaksProto := &pb.SendLeafKeyTweaks{LeavesToSend: leafTweaks}
+	data, err := proto.Marshal(leafTweaksProto)
+	require.NoError(t, err)
+	encrypted, err := eciesgo.Encrypt(publicKey, data)
+	require.NoError(t, err)
+
+	return map[string][]byte{cfg.Identifier: encrypted}
+}
+
+// TestValidateTransferPackage_PubkeyShareTweakMismatch verifies that
+// ValidateTransferPackage rejects a package where PubkeySharesTweak for this SO's
+// identifier does not equal SecretShareTweak * G.  A malicious client that supplies
+// an inconsistent public key share must be rejected so it cannot fool the SO into
+// accepting an incorrect key commitment.
+func TestValidateTransferPackage_PubkeyShareTweakMismatch(t *testing.T) {
+	cfg := sparktesting.TestConfig(t)
+	rng := rand.NewChaCha8([32]byte{99})
+
+	senderPrivKey := keys.MustGeneratePrivateKeyFromRand(rng)
+	transferID := uuid.New()
+	leaf := uuid.New()
+
+	keyTweakPackage := buildKeyTweakPackageWithMismatchedPubkey(t, cfg, rng, []uuid.UUID{leaf})
+
+	pkg := &pb.TransferPackage{
+		LeavesToSend: []*pb.UserSignedTxSigningJob{
+			{LeafId: leaf.String(), RawTx: createTestTxBytes(t, 1000)},
+		},
+		KeyTweakPackage: keyTweakPackage,
+	}
+	signTransferPackage(t, pkg, transferID, senderPrivKey)
+
+	h := NewBaseTransferHandler(cfg)
+	_, err := h.ValidateTransferPackage(
+		t.Context(),
+		transferID,
+		pkg,
+		senderPrivKey.Public(),
+		false,
+	)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "pubkey share tweak does not match secret share * G")
+}
+
 func TestValidateTransferPackage_RejectsDuplicateEncryptedKeyTweakLeafID(t *testing.T) {
 	cfg := sparktesting.TestConfig(t)
 	rng := rand.NewChaCha8([32]byte{47})
