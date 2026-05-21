@@ -2213,3 +2213,191 @@ func TestQueryAllTransfers_Equivalence_CounterSwap_SelfTransfer(t *testing.T) {
 	legacy, mimo, lerr, merr := f.runBothPathsAllTransfersCounterSwap(self, filter)
 	assertResultsEquivalent(t, "self_transfer_counter_swap", legacy, mimo, lerr, merr)
 }
+
+func (f *equivFixture) ctxForByParticipantFallback(viewer keys.Public, mimoKnob float64) context.Context {
+	ctx := authn.InjectSessionForTests(f.ctx, hex.EncodeToString(viewer.Serialize()), 9999999999)
+	return knobs.InjectKnobsService(ctx, knobs.NewFixedKnobs(map[string]float64{
+		knobs.KnobPrivacyEnabled:                         100,
+		knobs.KnobReadMIMODataModelByParticipantFallback: mimoKnob,
+		knobs.KnobReadMIMOMultiParticipantFormat:         0,
+	}))
+}
+
+func (f *equivFixture) runBothPathsAllTransfersByParticipantFallback(viewer keys.Public, filter *pb.TransferFilter) (legacyResp, mimoResp *pb.QueryTransfersResponse, legacyErr, mimoErr error) {
+	f.t.Helper()
+	ctxLegacy := f.ctxForByParticipantFallback(viewer, 0)
+	legacyResp, legacyErr = f.handler.QueryAllTransfers(ctxLegacy, filter, false)
+
+	ctxMIMO := f.ctxForByParticipantFallback(viewer, 100)
+	mimoResp, mimoErr = f.handler.QueryAllTransfers(ctxMIMO, filter, false)
+	return legacyResp, mimoResp, legacyErr, mimoErr
+}
+
+// TestQueryAllTransfers_Equivalence_ByParticipantFallback covers the shapes the
+// fallback is expected to claim. Single-receiver fixtures only: legacy uses
+// the denormalized parent columns (t.sender_identity_pubkey,
+// t.receiver_identity_pubkey) while the fallback uses the receiver/sender
+// edge tables — for single-receiver these agree by construction. Multi-receiver
+// divergence is tested separately below.
+func TestQueryAllTransfers_Equivalence_ByParticipantFallback(t *testing.T) {
+	if !sparktesting.PostgresTestsEnabled() {
+		t.Skip("equivalence tests require Postgres (receiver-axis predicate semantics)")
+	}
+	f := newEquivFixture(t)
+	f.setupEquivalenceData()
+
+	cases := []struct {
+		name   string
+		viewer keys.Public
+		filter *pb.TransferFilter
+	}{
+		// Bare sender — column SenderIdentityPubkeyEQ vs HasTransferSendersWith.
+		// Single-receiver fixtures: edge row matches the parent column.
+		{
+			"bare_sender",
+			f.sender,
+			senderFilter(f.sender),
+		},
+		// Sender + statuses (non-OutgoingInFlight subset so OutgoingInFlight
+		// doesn't claim). COMPLETED on sender pubkey returns 0 from the seeded
+		// data but still exercises the predicate path.
+		{
+			"sender_plus_completed",
+			f.sender,
+			withStatuses(senderFilter(f.sender), pb.TransferStatus_TRANSFER_STATUS_COMPLETED),
+		},
+		// Bare receiver — column ReceiverIdentityPubkeyEQ vs
+		// HasTransferReceiversWith. Single-receiver fixtures only.
+		{
+			"bare_receiver",
+			f.medium,
+			receiverFilter(f.medium),
+		},
+		// Bare SR1 — Or(receiver_col, sender_col) vs Or(HasReceivers, HasSenders).
+		{
+			"bare_SR1",
+			f.both,
+			senderOrReceiverFilter(f.both),
+		},
+		// SR1 + statuses on a wallet with only single-receiver entries.
+		{
+			"SR1_plus_receiver_key_tweaked",
+			f.both,
+			withStatuses(senderOrReceiverFilter(f.both),
+				pb.TransferStatus_TRANSFER_STATUS_RECEIVER_KEY_TWEAKED),
+		},
+		// Receiver + COMPLETED on an empty-result wallet — both paths return [].
+		{
+			"receiver_completed_no_matches",
+			f.cold,
+			withStatuses(receiverFilter(f.cold), pb.TransferStatus_TRANSFER_STATUS_COMPLETED),
+		},
+		// Pagination.
+		{
+			"pagination_limit_offset",
+			f.medium,
+			withLimitOffset(receiverFilter(f.medium), 5, 2),
+		},
+		// Time filter — created_after.
+		{
+			"created_after",
+			f.medium,
+			withCreatedAfter(receiverFilter(f.medium), f.baseNow.Add(-150*time.Minute)),
+		},
+		// ORDER ASCENDING.
+		{
+			"order_ascending",
+			f.medium,
+			withOrder(receiverFilter(f.medium), pb.Order_ASCENDING),
+		},
+		// Negative pagination — both paths must reject.
+		{
+			"negative_limit_rejected",
+			f.medium,
+			withLimitOffset(receiverFilter(f.medium), -1, 0),
+		},
+		{
+			"negative_offset_rejected",
+			f.medium,
+			withLimitOffset(receiverFilter(f.medium), 50, -1),
+		},
+		// Network unset — both paths must reject.
+		{
+			"network_unset_rejected",
+			f.medium,
+			&pb.TransferFilter{
+				Participant: &pb.TransferFilter_ReceiverIdentityPublicKey{
+					ReceiverIdentityPublicKey: f.medium.Serialize(),
+				},
+			},
+		},
+		// Out-of-range status enum — both paths must reject.
+		{
+			"invalid_status_enum_rejected",
+			f.medium,
+			withStatuses(receiverFilter(f.medium), pb.TransferStatus(99999)),
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			legacy, mimo, lerr, merr := f.runBothPathsAllTransfersByParticipantFallback(tc.viewer, tc.filter)
+			assertResultsEquivalent(t, tc.name, legacy, mimo, lerr, merr)
+		})
+	}
+}
+
+// TestQueryAllTransfers_ByParticipantFallback_PerReceiverDivergence locks the
+// MIMO-correctness invariant: a multi-receiver transfer where one receiver
+// row is COMPLETED while the parent transfers.status lags must surface for
+// the COMPLETED receiver's bare-receiver-plus-statuses query. Legacy's
+// t.status-only filter silently drops this row; the fallback's
+// receiver-edge predicate (filtering on transfer_receivers.status) returns
+// it. This is the documented divergence from legacy that motivates the
+// fallback's existence — the equivalence tests above pass on single-receiver
+// fixtures, but the receiver-axis is the authoritative source of truth and
+// the fallback is the floor that enforces it.
+func TestQueryAllTransfers_ByParticipantFallback_PerReceiverDivergence(t *testing.T) {
+	if !sparktesting.PostgresTestsEnabled() {
+		t.Skip("requires Postgres (receiver-axis predicate semantics)")
+	}
+	f := newEquivFixture(t)
+
+	completedReceiver := f.newPubkey()
+	laggingReceiver := f.newPubkey()
+	sender := f.newPubkey()
+	f.privacyEnabled(completedReceiver)
+
+	transfer := f.makeTransfer(makeTransferOpts{
+		transferType:   st.TransferTypeTransfer,
+		transferStatus: st.TransferStatusReceiverRefundSigned,
+		receiverStatus: st.TransferReceiverStatusCompleted,
+		sender:         sender,
+		receiver:       completedReceiver,
+		extraReceivers: []extraReceiverEquiv{
+			{pubkey: laggingReceiver, status: st.TransferReceiverStatusRefundSigned},
+		},
+		createTime: f.baseNow.Add(-30 * time.Minute),
+	})
+
+	// No types filter — receiverByTypeStatus declines, fallback claims.
+	filter := withStatuses(receiverFilter(completedReceiver),
+		pb.TransferStatus_TRANSFER_STATUS_COMPLETED)
+
+	// Legacy (fallback knob off) returns 0 rows — t.status=RECEIVER_REFUND_SIGNED
+	// fails the COMPLETED filter.
+	ctxLegacy := f.ctxForByParticipantFallback(completedReceiver, 0)
+	legacyResp, err := f.handler.QueryAllTransfers(ctxLegacy, filter, false)
+	require.NoError(t, err)
+	assert.Empty(t, legacyResp.GetTransfers(),
+		"legacy filters on t.status only and silently drops the completed receiver's row")
+
+	// Fallback (knob at 100) returns the transfer — r.status=COMPLETED on the
+	// completedReceiver's edge satisfies the receiver-axis predicate.
+	ctxMIMO := f.ctxForByParticipantFallback(completedReceiver, 100)
+	mimoResp, err := f.handler.QueryAllTransfers(ctxMIMO, filter, false)
+	require.NoError(t, err)
+	require.Len(t, mimoResp.Transfers, 1,
+		"fallback surfaces the completed receiver despite parent t.status lag")
+	assert.Equal(t, transfer.ID.String(), mimoResp.Transfers[0].Id)
+}
