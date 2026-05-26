@@ -3,6 +3,7 @@
 package handler
 
 import (
+	"encoding/hex"
 	"math/rand/v2"
 	"testing"
 	"time"
@@ -12,6 +13,7 @@ import (
 	"github.com/lightsparkdev/spark/common/keys"
 	sparkProto "github.com/lightsparkdev/spark/proto/spark"
 	pbinternal "github.com/lightsparkdev/spark/proto/spark_internal"
+	"github.com/lightsparkdev/spark/so/authn"
 	"github.com/lightsparkdev/spark/so/db"
 	"github.com/lightsparkdev/spark/so/ent"
 	st "github.com/lightsparkdev/spark/so/ent/schema/schematype"
@@ -491,4 +493,137 @@ func TestDeliverSenderKeyTweak_MissingKeyTweakForLeaf(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, st.TransferStatusSenderInitiated, updatedTransfer.Status,
 		"transfer must remain SenderInitiated when DeliverSenderKeyTweak fails")
+}
+
+func TestDeliverSenderKeyTweak_RejectsMismatchedSenderIdentity(t *testing.T) {
+	ctx, dbCtx := db.ConnectToTestPostgres(t)
+	rng := rand.NewChaCha8([32]byte{101})
+
+	cfg := sparktesting.TestConfig(t)
+
+	senderIdentityPrivKey := keys.MustGeneratePrivateKeyFromRand(rng)
+	receiverIdentityPrivKey := keys.MustGeneratePrivateKeyFromRand(rng)
+	attackerIdentityPrivKey := keys.MustGeneratePrivateKeyFromRand(rng)
+
+	keysharePrivKey := keys.MustGeneratePrivateKeyFromRand(rng)
+	publicSharePrivKey := keys.MustGeneratePrivateKeyFromRand(rng)
+	signingKeyshare, err := dbCtx.Client.SigningKeyshare.Create().
+		SetStatus(st.KeyshareStatusAvailable).
+		SetSecretShare(keysharePrivKey).
+		SetPublicShares(map[string]keys.Public{"test": publicSharePrivKey.Public()}).
+		SetPublicKey(keysharePrivKey.Public()).
+		SetMinSigners(2).
+		SetCoordinatorIndex(0).
+		Save(ctx)
+	require.NoError(t, err)
+
+	tree, err := dbCtx.Client.Tree.Create().
+		SetStatus(st.TreeStatusAvailable).
+		SetNetwork(btcnetwork.Regtest).
+		SetOwnerIdentityPubkey(senderIdentityPrivKey.Public()).
+		SetBaseTxid(st.NewRandomTxIDForTesting(t)).
+		SetVout(0).
+		Save(ctx)
+	require.NoError(t, err)
+
+	verifyingPrivKey := keys.MustGeneratePrivateKeyFromRand(rng)
+	ownerSigningPrivKey := keys.MustGeneratePrivateKeyFromRand(rng)
+	leaf, err := dbCtx.Client.TreeNode.Create().
+		SetStatus(st.TreeNodeStatusAvailable).
+		SetTree(tree).
+		SetNetwork(tree.Network).
+		SetSigningKeyshare(signingKeyshare).
+		SetValue(1000).
+		SetVerifyingPubkey(verifyingPrivKey.Public()).
+		SetOwnerIdentityPubkey(senderIdentityPrivKey.Public()).
+		SetOwnerSigningPubkey(ownerSigningPrivKey.Public()).
+		SetRawTx(createTestTxBytes(t, 3000)).
+		SetRawRefundTx(createTestTxBytes(t, 3100)).
+		SetVout(0).
+		Save(ctx)
+	require.NoError(t, err)
+
+	transferID := uuid.New()
+	transfer, err := dbCtx.Client.Transfer.Create().
+		SetID(transferID).
+		SetNetwork(btcnetwork.Regtest).
+		SetStatus(st.TransferStatusSenderInitiated).
+		SetType(st.TransferTypeTransfer).
+		SetSenderIdentityPubkey(senderIdentityPrivKey.Public()).
+		SetReceiverIdentityPubkey(receiverIdentityPrivKey.Public()).
+		SetTotalValue(1000).
+		SetExpiryTime(time.Now().Add(24 * time.Hour)).
+		Save(ctx)
+	require.NoError(t, err)
+
+	transferLeaf, err := dbCtx.Client.TransferLeaf.Create().
+		SetTransfer(transfer).
+		SetLeaf(leaf).
+		SetPreviousRefundTx(createTestTxBytes(t, 4000)).
+		SetIntermediateRefundTx(createTestTxBytes(t, 4001)).
+		Save(ctx)
+	require.NoError(t, err)
+
+	keyTweakPackage := buildKeyTweakPackageForLeaves(t, cfg, rng, []uuid.UUID{leaf.ID})
+	pkg := &sparkProto.TransferPackage{
+		LeavesToSend: []*sparkProto.UserSignedTxSigningJob{
+			{LeafId: leaf.ID.String(), RawTx: leaf.RawRefundTx},
+		},
+		KeyTweakPackage: keyTweakPackage,
+	}
+	signTransferPackage(t, pkg, transferID, attackerIdentityPrivKey)
+
+	req := &pbinternal.DeliverSenderKeyTweakRequest{
+		TransferId:              transferID.String(),
+		SenderIdentityPublicKey: attackerIdentityPrivKey.Public().Serialize(),
+		TransferPackage:         pkg,
+	}
+
+	handler := NewInternalTransferHandler(cfg)
+	err = handler.DeliverSenderKeyTweak(ctx, req)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "sender identity public key does not match transfer sender")
+
+	updatedTransfer, err := dbCtx.Client.Transfer.Get(ctx, transferID)
+	require.NoError(t, err)
+	assert.Equal(t, st.TransferStatusSenderInitiated, updatedTransfer.Status)
+
+	updatedTransferLeaf, err := dbCtx.Client.TransferLeaf.Get(ctx, transferLeaf.ID)
+	require.NoError(t, err)
+	assert.Empty(t, updatedTransferLeaf.KeyTweak)
+}
+
+func TestFinalizeTransferWithTransferPackageRejectsSessionSenderMismatch(t *testing.T) {
+	ctx, dbCtx := db.ConnectToTestPostgres(t)
+	rng := rand.NewChaCha8([32]byte{102})
+
+	cfg := sparktesting.TestConfig(t)
+	cfg.AuthzEnforced = true
+
+	senderIdentityPrivKey := keys.MustGeneratePrivateKeyFromRand(rng)
+	receiverIdentityPrivKey := keys.MustGeneratePrivateKeyFromRand(rng)
+	sessionIdentityPrivKey := keys.MustGeneratePrivateKeyFromRand(rng)
+
+	transferID := uuid.New()
+	_, err := dbCtx.Client.Transfer.Create().
+		SetID(transferID).
+		SetNetwork(btcnetwork.Regtest).
+		SetStatus(st.TransferStatusSenderInitiated).
+		SetType(st.TransferTypeTransfer).
+		SetSenderIdentityPubkey(senderIdentityPrivKey.Public()).
+		SetReceiverIdentityPubkey(receiverIdentityPrivKey.Public()).
+		SetTotalValue(1000).
+		SetExpiryTime(time.Now().Add(24 * time.Hour)).
+		Save(ctx)
+	require.NoError(t, err)
+
+	ctx = authn.InjectSessionForTests(ctx, hex.EncodeToString(sessionIdentityPrivKey.Public().Serialize()), time.Now().Add(time.Hour).Unix())
+	handler := NewTransferHandler(cfg)
+	_, err = handler.FinalizeTransferWithTransferPackage(ctx, &sparkProto.FinalizeTransferWithTransferPackageRequest{
+		TransferId: transferID.String(),
+	})
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "session identity does not match request identity")
 }
