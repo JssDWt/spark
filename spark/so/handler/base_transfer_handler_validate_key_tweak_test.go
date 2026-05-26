@@ -231,13 +231,15 @@ func TestValidateTransferPackage_ExtraKeyTweakForUnknownLeaf(t *testing.T) {
 }
 
 // buildKeyTweakPackageWithMismatchedPubkey builds a TransferPackage.KeyTweakPackage
-// where PubkeySharesTweak for the SO's own identifier is set to a random key.
-// The remaining payload is valid, so the failure isolates the cross-verification check.
+// where PubkeySharesTweak for corruptID is set to a random key. The remaining
+// payload is valid, so the failure isolates the cross-verification check for that
+// operator's entry.
 func buildKeyTweakPackageWithMismatchedPubkey(
 	t *testing.T,
 	cfg *so.Config,
 	rng *rand.ChaCha8,
 	tweakedLeafIDs []uuid.UUID,
+	corruptID string,
 ) map[string][]byte {
 	t.Helper()
 
@@ -246,7 +248,7 @@ func buildKeyTweakPackageWithMismatchedPubkey(
 		secretShare, pubkeySharesTweak := createValidSecretShares(cfg, rng)
 
 		wrongKey := keys.MustGeneratePrivateKeyFromRand(rng)
-		pubkeySharesTweak[cfg.Identifier] = wrongKey.Public().Serialize()
+		pubkeySharesTweak[corruptID] = wrongKey.Public().Serialize()
 
 		publicKey, err := eciesgo.NewPublicKeyFromBytes(cfg.IdentityPublicKey().Serialize())
 		require.NoError(t, err)
@@ -275,39 +277,61 @@ func buildKeyTweakPackageWithMismatchedPubkey(
 }
 
 // TestValidateTransferPackage_PubkeyShareTweakMismatch verifies that
-// ValidateTransferPackage rejects a package where PubkeySharesTweak for this SO's
-// identifier does not equal SecretShareTweak * G.  A malicious client that supplies
-// an inconsistent public key share must be rejected so it cannot fool the SO into
-// accepting an incorrect key commitment.
+// ValidateTransferPackage rejects a package where any operator's PubkeySharesTweak
+// entry is inconsistent with the polynomial commitment derived from the supplied
+// proofs. Covers both this SO's own entry and a peer operator's entry, since the
+// validator must check every operator's tweak — not just its own.
 func TestValidateTransferPackage_PubkeyShareTweakMismatch(t *testing.T) {
 	cfg := sparktesting.TestConfig(t)
-	rng := rand.NewChaCha8([32]byte{99})
 
-	senderPrivKey := keys.MustGeneratePrivateKeyFromRand(rng)
-	transferID := uuid.New()
-	leaf := uuid.New()
-
-	keyTweakPackage := buildKeyTweakPackageWithMismatchedPubkey(t, cfg, rng, []uuid.UUID{leaf})
-
-	pkg := &pb.TransferPackage{
-		LeavesToSend: []*pb.UserSignedTxSigningJob{
-			{LeafId: leaf.String(), RawTx: createTestTxBytes(t, 1000)},
-		},
-		KeyTweakPackage: keyTweakPackage,
+	var peerID string
+	for id := range cfg.SigningOperatorMap {
+		if id != cfg.Identifier {
+			peerID = id
+			break
+		}
 	}
-	signTransferPackage(t, pkg, transferID, senderPrivKey)
+	require.NotEmpty(t, peerID, "test config must include at least one peer operator")
 
-	h := NewBaseTransferHandler(cfg)
-	_, err := h.ValidateTransferPackage(
-		t.Context(),
-		transferID,
-		pkg,
-		senderPrivKey.Public(),
-		false,
-	)
+	tests := []struct {
+		name      string
+		corruptID string
+	}{
+		{name: "self", corruptID: cfg.Identifier},
+		{name: "peer", corruptID: peerID},
+	}
 
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "pubkey share tweak does not match secret share * G")
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			rng := rand.NewChaCha8([32]byte{99})
+			senderPrivKey := keys.MustGeneratePrivateKeyFromRand(rng)
+			transferID := uuid.New()
+			leaf := uuid.New()
+
+			keyTweakPackage := buildKeyTweakPackageWithMismatchedPubkey(t, cfg, rng, []uuid.UUID{leaf}, tc.corruptID)
+
+			pkg := &pb.TransferPackage{
+				LeavesToSend: []*pb.UserSignedTxSigningJob{
+					{LeafId: leaf.String(), RawTx: createTestTxBytes(t, 1000)},
+				},
+				KeyTweakPackage: keyTweakPackage,
+			}
+			signTransferPackage(t, pkg, transferID, senderPrivKey)
+
+			h := NewBaseTransferHandler(cfg)
+			_, err := h.ValidateTransferPackage(
+				t.Context(),
+				transferID,
+				pkg,
+				senderPrivKey.Public(),
+				false,
+			)
+
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "does not match polynomial commitment")
+			assert.Contains(t, err.Error(), tc.corruptID)
+		})
+	}
 }
 
 func TestValidateTransferPackage_RejectsDuplicateEncryptedKeyTweakLeafID(t *testing.T) {
