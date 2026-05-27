@@ -3,6 +3,7 @@
 package handler
 
 import (
+	"context"
 	"encoding/hex"
 	"math/rand/v2"
 	"testing"
@@ -13,6 +14,7 @@ import (
 	"github.com/lightsparkdev/spark/common/keys"
 	sparkProto "github.com/lightsparkdev/spark/proto/spark"
 	pbinternal "github.com/lightsparkdev/spark/proto/spark_internal"
+	"github.com/lightsparkdev/spark/so"
 	"github.com/lightsparkdev/spark/so/authn"
 	"github.com/lightsparkdev/spark/so/db"
 	"github.com/lightsparkdev/spark/so/ent"
@@ -465,7 +467,7 @@ func TestDeliverSenderKeyTweak_MissingKeyTweakForLeaf(t *testing.T) {
 	// Build a transfer package with key tweaks for ONLY the first leaf (not the second).
 	// Uses buildKeyTweakPackageForLeaves + signTransferPackage so the signature covers
 	// the actual LeavesToSend payload (not an empty slice).
-	keyTweakPackage := buildKeyTweakPackageForLeaves(t, cfg, rng, []uuid.UUID{leaves[0].ID})
+	keyTweakPackage, _ := buildKeyTweakPackageForLeaves(t, cfg, rng, []uuid.UUID{leaves[0].ID})
 	pkg := &sparkProto.TransferPackage{
 		LeavesToSend: []*sparkProto.UserSignedTxSigningJob{
 			{LeafId: leaves[0].ID.String(), RawTx: leaves[0].RawRefundTx},
@@ -564,7 +566,7 @@ func TestDeliverSenderKeyTweak_RejectsMismatchedSenderIdentity(t *testing.T) {
 		Save(ctx)
 	require.NoError(t, err)
 
-	keyTweakPackage := buildKeyTweakPackageForLeaves(t, cfg, rng, []uuid.UUID{leaf.ID})
+	keyTweakPackage, keyTweakProofs := buildKeyTweakPackageForLeaves(t, cfg, rng, []uuid.UUID{leaf.ID})
 	pkg := &sparkProto.TransferPackage{
 		LeavesToSend: []*sparkProto.UserSignedTxSigningJob{
 			{LeafId: leaf.ID.String(), RawTx: leaf.RawRefundTx},
@@ -577,6 +579,7 @@ func TestDeliverSenderKeyTweak_RejectsMismatchedSenderIdentity(t *testing.T) {
 		TransferId:              transferID.String(),
 		SenderIdentityPublicKey: attackerIdentityPrivKey.Public().Serialize(),
 		TransferPackage:         pkg,
+		SenderKeyTweakProofs:    keyTweakProofs,
 	}
 
 	handler := NewInternalTransferHandler(cfg)
@@ -626,4 +629,142 @@ func TestFinalizeTransferWithTransferPackageRejectsSessionSenderMismatch(t *test
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "session identity does not match request identity")
+}
+
+// TestDeliverSenderKeyTweak_ProofMismatch_RetainsSenderInitiated verifies that
+// DeliverSenderKeyTweak rejects a request whose coordinator-supplied
+// SenderKeyTweakProofs do not match the proofs encrypted in the transfer package,
+// and that the transfer remains in SenderInitiated state.
+func TestDeliverSenderKeyTweak_ProofMismatch_RetainsSenderInitiated(t *testing.T) {
+	ctx, dbCtx := db.ConnectToTestPostgres(t)
+	cfg := sparktesting.TestConfig(t)
+	rng := rand.NewChaCha8([32]byte{77})
+
+	transferID, leafID, req := setupSingleLeafDeliverFixture(t, ctx, dbCtx, cfg, rng)
+
+	req.SenderKeyTweakProofs = map[string]*sparkProto.SecretProof{
+		leafID.String(): {Proofs: [][]byte{[]byte("garbage-proof-bytes-that-cannot-match")}},
+	}
+
+	err := NewInternalTransferHandler(cfg).DeliverSenderKeyTweak(ctx, req)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "sender key tweak proof mismatch")
+
+	updatedTransfer, err := dbCtx.Client.Transfer.Get(ctx, transferID)
+	require.NoError(t, err)
+	assert.Equal(t, st.TransferStatusSenderInitiated, updatedTransfer.Status,
+		"transfer must remain SenderInitiated when cross-SO proof check fails")
+}
+
+// TestDeliverSenderKeyTweak_MissingProofs_RetainsSenderInitiated verifies that
+// DeliverSenderKeyTweak rejects a request whose SenderKeyTweakProofs field is
+// absent — i.e., the cross-SO proof check is required, not skippable.
+func TestDeliverSenderKeyTweak_MissingProofs_RetainsSenderInitiated(t *testing.T) {
+	ctx, dbCtx := db.ConnectToTestPostgres(t)
+	cfg := sparktesting.TestConfig(t)
+	rng := rand.NewChaCha8([32]byte{78})
+
+	transferID, _, req := setupSingleLeafDeliverFixture(t, ctx, dbCtx, cfg, rng)
+	// req.SenderKeyTweakProofs intentionally left nil.
+
+	err := NewInternalTransferHandler(cfg).DeliverSenderKeyTweak(ctx, req)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "must not be nil")
+
+	updatedTransfer, err := dbCtx.Client.Transfer.Get(ctx, transferID)
+	require.NoError(t, err)
+	assert.Equal(t, st.TransferStatusSenderInitiated, updatedTransfer.Status,
+		"transfer must remain SenderInitiated when SenderKeyTweakProofs is missing")
+}
+
+// setupSingleLeafDeliverFixture builds the minimal DB state and a signed
+// transfer package needed to drive DeliverSenderKeyTweak through to the
+// cross-SO proof check. The returned request has TransferPackage populated;
+// callers set SenderKeyTweakProofs (or leave it nil) to exercise the check.
+func setupSingleLeafDeliverFixture(
+	t *testing.T,
+	ctx context.Context,
+	dbCtx *db.TestContext,
+	cfg *so.Config,
+	rng *rand.ChaCha8,
+) (uuid.UUID, uuid.UUID, *pbinternal.DeliverSenderKeyTweakRequest) {
+	t.Helper()
+
+	senderIdentityPrivKey := keys.MustGeneratePrivateKeyFromRand(rng)
+	receiverIdentityPrivKey := keys.MustGeneratePrivateKeyFromRand(rng)
+
+	keysharePrivKey := keys.MustGeneratePrivateKeyFromRand(rng)
+	publicSharePrivKey := keys.MustGeneratePrivateKeyFromRand(rng)
+	signingKeyshare, err := dbCtx.Client.SigningKeyshare.Create().
+		SetStatus(st.KeyshareStatusAvailable).
+		SetSecretShare(keysharePrivKey).
+		SetPublicShares(map[string]keys.Public{"test": publicSharePrivKey.Public()}).
+		SetPublicKey(keysharePrivKey.Public()).
+		SetMinSigners(2).
+		SetCoordinatorIndex(0).
+		Save(ctx)
+	require.NoError(t, err)
+
+	tree, err := dbCtx.Client.Tree.Create().
+		SetStatus(st.TreeStatusAvailable).
+		SetNetwork(btcnetwork.Regtest).
+		SetOwnerIdentityPubkey(senderIdentityPrivKey.Public()).
+		SetBaseTxid(st.NewRandomTxIDForTesting(t)).
+		SetVout(0).
+		Save(ctx)
+	require.NoError(t, err)
+
+	verifyingPrivKey := keys.MustGeneratePrivateKeyFromRand(rng)
+	ownerSigningPrivKey := keys.MustGeneratePrivateKeyFromRand(rng)
+	leaf, err := dbCtx.Client.TreeNode.Create().
+		SetStatus(st.TreeNodeStatusAvailable).
+		SetTree(tree).
+		SetNetwork(tree.Network).
+		SetSigningKeyshare(signingKeyshare).
+		SetValue(1000).
+		SetVerifyingPubkey(verifyingPrivKey.Public()).
+		SetOwnerIdentityPubkey(senderIdentityPrivKey.Public()).
+		SetOwnerSigningPubkey(ownerSigningPrivKey.Public()).
+		SetRawTx(createTestTxBytes(t, 3000)).
+		SetRawRefundTx(createTestTxBytes(t, 3100)).
+		SetVout(0).
+		Save(ctx)
+	require.NoError(t, err)
+
+	transferID := uuid.New()
+	transfer, err := dbCtx.Client.Transfer.Create().
+		SetID(transferID).
+		SetNetwork(btcnetwork.Regtest).
+		SetStatus(st.TransferStatusSenderInitiated).
+		SetType(st.TransferTypeTransfer).
+		SetSenderIdentityPubkey(senderIdentityPrivKey.Public()).
+		SetReceiverIdentityPubkey(receiverIdentityPrivKey.Public()).
+		SetTotalValue(1000).
+		SetExpiryTime(time.Now().Add(24 * time.Hour)).
+		Save(ctx)
+	require.NoError(t, err)
+
+	_, err = dbCtx.Client.TransferLeaf.Create().
+		SetTransfer(transfer).
+		SetLeaf(leaf).
+		SetPreviousRefundTx(createTestTxBytes(t, 4000)).
+		SetIntermediateRefundTx(createTestTxBytes(t, 4001)).
+		Save(ctx)
+	require.NoError(t, err)
+
+	keyTweakPackage, _ := buildKeyTweakPackageForLeaves(t, cfg, rng, []uuid.UUID{leaf.ID})
+	pkg := &sparkProto.TransferPackage{
+		LeavesToSend: []*sparkProto.UserSignedTxSigningJob{
+			{LeafId: leaf.ID.String(), RawTx: leaf.RawRefundTx},
+		},
+		KeyTweakPackage: keyTweakPackage,
+	}
+	signTransferPackage(t, pkg, transferID, senderIdentityPrivKey)
+
+	req := &pbinternal.DeliverSenderKeyTweakRequest{
+		TransferId:              transferID.String(),
+		SenderIdentityPublicKey: senderIdentityPrivKey.Public().Serialize(),
+		TransferPackage:         pkg,
+	}
+	return transferID, leaf.ID, req
 }

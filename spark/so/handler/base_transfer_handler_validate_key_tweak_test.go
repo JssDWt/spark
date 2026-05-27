@@ -21,16 +21,18 @@ import (
 
 // buildKeyTweakPackageForLeaves encrypts key tweaks for the given leaf IDs into
 // a TransferPackage.KeyTweakPackage map. Only the leaf IDs listed in tweakedLeafIDs
-// will have entries in the encrypted payload.
+// will have entries in the encrypted payload. The second return value is the
+// leaf-ID-keyed proof map a coordinator would attach as SenderKeyTweakProofs.
 func buildKeyTweakPackageForLeaves(
 	t *testing.T,
 	cfg *so.Config,
 	rng *rand.ChaCha8,
 	tweakedLeafIDs []uuid.UUID,
-) map[string][]byte {
+) (map[string][]byte, map[string]*pb.SecretProof) {
 	t.Helper()
 
 	var leafTweaks []*pb.SendLeafKeyTweak
+	proofs := make(map[string]*pb.SecretProof, len(tweakedLeafIDs))
 	for _, leafID := range tweakedLeafIDs {
 		secretShare, pubkeySharesTweak := createValidSecretShares(cfg, rng)
 		publicKey, err := eciesgo.NewPublicKeyFromBytes(cfg.IdentityPublicKey().Serialize())
@@ -45,6 +47,7 @@ func buildKeyTweakPackageForLeaves(
 			SecretCipher:      secretCipher,
 			Signature:         []byte("mock_signature_for_testing"),
 		})
+		proofs[leafID.String()] = &pb.SecretProof{Proofs: secretShare.GetProofs()}
 	}
 
 	publicKey, err := eciesgo.NewPublicKeyFromBytes(cfg.IdentityPublicKey().Serialize())
@@ -56,7 +59,7 @@ func buildKeyTweakPackageForLeaves(
 	encrypted, err := eciesgo.Encrypt(publicKey, data)
 	require.NoError(t, err)
 
-	return map[string][]byte{cfg.Identifier: encrypted}
+	return map[string][]byte{cfg.Identifier: encrypted}, proofs
 }
 
 // signTransferPackage signs the given TransferPackage and sets UserSignature.
@@ -86,7 +89,7 @@ func TestValidateTransferPackage_MissingKeyTweakForRefundLeaf(t *testing.T) {
 	leafWithoutTweak := uuid.New()
 
 	// Encrypt key tweaks for ONLY leafWithTweak — leafWithoutTweak is missing.
-	keyTweakPackage := buildKeyTweakPackageForLeaves(t, cfg, rng, []uuid.UUID{leafWithTweak})
+	keyTweakPackage, _ := buildKeyTweakPackageForLeaves(t, cfg, rng, []uuid.UUID{leafWithTweak})
 
 	pkg := &pb.TransferPackage{
 		LeavesToSend: []*pb.UserSignedTxSigningJob{
@@ -124,7 +127,7 @@ func TestValidateTransferPackage_AllLeavesHaveKeyTweaks(t *testing.T) {
 	leaf2 := uuid.New()
 
 	// Encrypt key tweaks for BOTH leaves.
-	keyTweakPackage := buildKeyTweakPackageForLeaves(t, cfg, rng, []uuid.UUID{leaf1, leaf2})
+	keyTweakPackage, _ := buildKeyTweakPackageForLeaves(t, cfg, rng, []uuid.UUID{leaf1, leaf2})
 
 	pkg := &pb.TransferPackage{
 		LeavesToSend: []*pb.UserSignedTxSigningJob{
@@ -167,7 +170,7 @@ func TestValidateTransferPackage_MismatchedKeyTweakLeafID(t *testing.T) {
 
 	// Encrypt key tweaks for leaf1 and wrongLeaf (not leaf2).
 	// Count matches (2 vs 2) but leaf2 has no tweak.
-	keyTweakPackage := buildKeyTweakPackageForLeaves(t, cfg, rng, []uuid.UUID{leaf1, wrongLeaf})
+	keyTweakPackage, _ := buildKeyTweakPackageForLeaves(t, cfg, rng, []uuid.UUID{leaf1, wrongLeaf})
 
 	pkg := &pb.TransferPackage{
 		LeavesToSend: []*pb.UserSignedTxSigningJob{
@@ -207,7 +210,7 @@ func TestValidateTransferPackage_ExtraKeyTweakForUnknownLeaf(t *testing.T) {
 
 	// Encrypt key tweaks for both realLeaf AND extraLeaf, but only include
 	// realLeaf in LeavesToSend. The extra entry should be rejected.
-	keyTweakPackage := buildKeyTweakPackageForLeaves(t, cfg, rng, []uuid.UUID{realLeaf, extraLeaf})
+	keyTweakPackage, _ := buildKeyTweakPackageForLeaves(t, cfg, rng, []uuid.UUID{realLeaf, extraLeaf})
 
 	pkg := &pb.TransferPackage{
 		LeavesToSend: []*pb.UserSignedTxSigningJob{
@@ -341,7 +344,7 @@ func TestValidateTransferPackage_RejectsDuplicateEncryptedKeyTweakLeafID(t *test
 	transferID := uuid.New()
 	leafID := uuid.New()
 
-	keyTweakPackage := buildKeyTweakPackageForLeaves(t, cfg, rng, []uuid.UUID{leafID, leafID})
+	keyTweakPackage, _ := buildKeyTweakPackageForLeaves(t, cfg, rng, []uuid.UUID{leafID, leafID})
 
 	pkg := &pb.TransferPackage{
 		LeavesToSend: []*pb.UserSignedTxSigningJob{{
