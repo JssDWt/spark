@@ -4,6 +4,7 @@ package handler
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/hex"
 	"math/rand/v2"
 	"testing"
@@ -214,6 +215,144 @@ func TestSettleSenderKeyTweak_Commit_PreimageSwapRequiresSharedPreimage(t *testi
 	updatedTransferLeaf, err := client.TransferLeaf.Get(ctx, transferLeaf.ID)
 	require.NoError(t, err)
 	assert.NotEmpty(t, updatedTransferLeaf.KeyTweak, "rejected commit must leave sender key tweak material pending")
+}
+
+func TestSettleSenderKeyTweak_Commit_PreimageSwapRequiresStoredMatchingPreimage(t *testing.T) {
+	testCases := []struct {
+		name              string
+		preimage          []byte
+		mismatchHash      bool
+		expectedSubstring string
+	}{
+		{
+			name:              "missing preimage",
+			expectedSubstring: "does not have a stored 32-byte preimage",
+		},
+		{
+			name:              "short preimage",
+			preimage:          []byte{0x01},
+			expectedSubstring: "does not have a stored 32-byte preimage",
+		},
+		{
+			name:              "wrong payment hash",
+			preimage:          append([]byte{0x01}, make([]byte, sha256.Size-1)...),
+			mismatchHash:      true,
+			expectedSubstring: "stored preimage does not match payment hash",
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, dbCtx := db.ConnectToTestPostgres(t)
+			cfg := sparktesting.TestConfig(t)
+			rng := rand.NewChaCha8([32]byte{123})
+
+			senderPrivKey := keys.MustGeneratePrivateKeyFromRand(rng)
+			receiverPrivKey := keys.MustGeneratePrivateKeyFromRand(rng)
+			keysharePrivKey := keys.MustGeneratePrivateKeyFromRand(rng)
+			publicSharePrivKey := keys.MustGeneratePrivateKeyFromRand(rng)
+			verifyingPrivKey := keys.MustGeneratePrivateKeyFromRand(rng)
+			ownerSigningPrivKey := keys.MustGeneratePrivateKeyFromRand(rng)
+			client := dbCtx.Client
+
+			signingKeyshare, err := client.SigningKeyshare.Create().
+				SetStatus(st.KeyshareStatusAvailable).
+				SetSecretShare(keysharePrivKey).
+				SetPublicShares(map[string]keys.Public{cfg.Identifier: publicSharePrivKey.Public()}).
+				SetPublicKey(keysharePrivKey.Public()).
+				SetMinSigners(2).
+				SetCoordinatorIndex(0).
+				Save(ctx)
+			require.NoError(t, err)
+
+			tree, err := client.Tree.Create().
+				SetStatus(st.TreeStatusAvailable).
+				SetNetwork(btcnetwork.Regtest).
+				SetOwnerIdentityPubkey(senderPrivKey.Public()).
+				SetBaseTxid(st.NewRandomTxIDForTesting(t)).
+				SetVout(0).
+				Save(ctx)
+			require.NoError(t, err)
+
+			leaf, err := client.TreeNode.Create().
+				SetStatus(st.TreeNodeStatusAvailable).
+				SetTree(tree).
+				SetNetwork(tree.Network).
+				SetSigningKeyshare(signingKeyshare).
+				SetValue(1000).
+				SetVerifyingPubkey(verifyingPrivKey.Public()).
+				SetOwnerIdentityPubkey(senderPrivKey.Public()).
+				SetOwnerSigningPubkey(ownerSigningPrivKey.Public()).
+				SetRawTx(createTestTxBytes(t, 5300)).
+				SetRawRefundTx(createTestTxBytes(t, 5301)).
+				SetVout(0).
+				Save(ctx)
+			require.NoError(t, err)
+
+			transfer, err := client.Transfer.Create().
+				SetNetwork(btcnetwork.Regtest).
+				SetStatus(st.TransferStatusSenderKeyTweakPending).
+				SetType(st.TransferTypePreimageSwap).
+				SetSenderIdentityPubkey(senderPrivKey.Public()).
+				SetReceiverIdentityPubkey(receiverPrivKey.Public()).
+				SetTotalValue(1000).
+				SetExpiryTime(time.Now().Add(24 * time.Hour)).
+				Save(ctx)
+			require.NoError(t, err)
+
+			secretShare, pubkeySharesTweak := createValidSecretShares(cfg, rng)
+			keyTweakBytes, err := proto.Marshal(&sparkProto.SendLeafKeyTweak{
+				LeafId:            leaf.ID.String(),
+				SecretShareTweak:  secretShare,
+				PubkeySharesTweak: pubkeySharesTweak,
+				SecretCipher:      []byte("encrypted-secret-share"),
+				Signature:         []byte("mock-key-tweak-signature"),
+			})
+			require.NoError(t, err)
+
+			transferLeaf, err := client.TransferLeaf.Create().
+				SetTransfer(transfer).
+				SetLeaf(leaf).
+				SetPreviousRefundTx(createTestTxBytes(t, 5400)).
+				SetIntermediateRefundTx(createTestTxBytes(t, 5401)).
+				SetKeyTweak(keyTweakBytes).
+				Save(ctx)
+			require.NoError(t, err)
+
+			paymentHash := make([]byte, sha256.Size)
+			if len(tc.preimage) > 0 {
+				hash := sha256.Sum256(tc.preimage)
+				copy(paymentHash, hash[:])
+			}
+			if tc.mismatchHash {
+				paymentHash[0] ^= 0xff
+			}
+			preimageCreate := client.PreimageRequest.Create().
+				SetPaymentHash(paymentHash).
+				SetStatus(st.PreimageRequestStatusPreimageShared).
+				SetReceiverIdentityPubkey(receiverPrivKey.Public()).
+				SetTransfers(transfer)
+			if tc.preimage != nil {
+				preimageCreate.SetPreimage(tc.preimage)
+			}
+			_, err = preimageCreate.Save(ctx)
+			require.NoError(t, err)
+
+			handler := NewInternalTransferHandler(cfg)
+			err = handler.SettleSenderKeyTweak(ctx, &pbinternal.SettleSenderKeyTweakRequest{
+				TransferId: transfer.ID.String(),
+				Action:     pbinternal.SettleKeyTweakAction_COMMIT,
+			})
+
+			require.ErrorContains(t, err, tc.expectedSubstring)
+			updatedTransfer, err := client.Transfer.Get(ctx, transfer.ID)
+			require.NoError(t, err)
+			assert.Equal(t, st.TransferStatusSenderKeyTweakPending, updatedTransfer.Status)
+			updatedTransferLeaf, err := client.TransferLeaf.Get(ctx, transferLeaf.ID)
+			require.NoError(t, err)
+			assert.NotEmpty(t, updatedTransferLeaf.KeyTweak, "rejected commit must leave sender key tweak material pending")
+		})
+	}
 }
 
 func TestCommitSenderKeyTweaks_RejectsNilProofValue(t *testing.T) {
