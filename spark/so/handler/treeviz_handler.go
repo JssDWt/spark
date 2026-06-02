@@ -19,7 +19,6 @@ import (
 	enttreenode "github.com/lightsparkdev/spark/so/ent/treenode"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
-	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
@@ -661,7 +660,7 @@ func marshalTreeVizNode(
 ) (*pb.TreeVizNode, error) {
 	var parentNodeID *string
 	if node.Edges.Parent != nil {
-		parentNodeID = proto.String(node.Edges.Parent.ID.String())
+		parentNodeID = new(node.Edges.Parent.ID.String())
 	}
 
 	networkProto, err := node.Network.MarshalProto()
@@ -696,10 +695,10 @@ func marshalTreeVizNode(
 	// The ent schema declares these fields Optional (non-Nillable uint64), so
 	// 0 is the zero-value sentinel meaning "not yet confirmed on-chain".
 	if node.NodeConfirmationHeight > 0 {
-		protoNode.NodeConfirmationHeight = proto.Uint64(node.NodeConfirmationHeight)
+		protoNode.NodeConfirmationHeight = new(node.NodeConfirmationHeight)
 	}
 	if node.RefundConfirmationHeight > 0 {
-		protoNode.RefundConfirmationHeight = proto.Uint64(node.RefundConfirmationHeight)
+		protoNode.RefundConfirmationHeight = new(node.RefundConfirmationHeight)
 	}
 	return protoNode, nil
 }

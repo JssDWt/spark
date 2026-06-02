@@ -14,8 +14,6 @@ func TestCheckParentsAndMarkBadLeavesRejectsNilParentNodeWithoutPanic(t *testing
 	nodeID := uuid.NewString()
 	parentA := uuid.NewString()
 	parentB := uuid.NewString()
-	grandparentB := uuid.NewString()
-
 	operatorsTreeNodesList := NewOperatorsTreeNodesList(2)
 	operatorsTreeNodesList.Add(OperatorTreeNodes{
 		operatorID: "operator-a",
@@ -28,7 +26,7 @@ func TestCheckParentsAndMarkBadLeavesRejectsNilParentNodeWithoutPanic(t *testing
 		operatorID: "operator-b",
 		nodes: map[string]*pb.TreeNode{
 			nodeID:  {Id: nodeID, ParentNodeId: &parentB},
-			parentB: {Id: parentB, ParentNodeId: &grandparentB},
+			parentB: {Id: parentB, ParentNodeId: new(uuid.NewString())},
 		},
 	})
 	currentNodes := operatorsTreeNodesList.GetOperatorToTreeNodeMap(nodeID)
