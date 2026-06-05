@@ -409,9 +409,9 @@ func transferIDsOf(resp *pb.QueryTransfersResponse) []string {
 	if resp == nil {
 		return nil
 	}
-	ids := make([]string, 0, len(resp.Transfers))
-	for _, t := range resp.Transfers {
-		ids = append(ids, t.Id)
+	ids := make([]string, 0, len(resp.GetTransfers()))
+	for _, t := range resp.GetTransfers() {
+		ids = append(ids, t.GetId())
 	}
 	return ids
 }
@@ -419,9 +419,9 @@ func transferIDsOf(resp *pb.QueryTransfersResponse) []string {
 // leafIDSetOf returns the sorted set of leaf-row IDs on a transfer proto,
 // independent of order.
 func leafIDSetOf(t *pb.Transfer) []string {
-	ids := make([]string, 0, len(t.Leaves))
-	for _, l := range t.Leaves {
-		ids = append(ids, l.Leaf.Id)
+	ids := make([]string, 0, len(t.GetLeaves()))
+	for _, l := range t.GetLeaves() {
+		ids = append(ids, l.GetLeaf().GetId())
 	}
 	sort.Strings(ids)
 	return ids
@@ -452,20 +452,20 @@ func assertResultsEquivalent(t *testing.T, name string, legacy, mimo *pb.QueryTr
 	if !assert.Equal(t, legacyIDs, mimoIDs, "%s: transfer ID order mismatch", name) {
 		return
 	}
-	assert.Equal(t, legacy.Offset, mimo.Offset, "%s: response Offset mismatch", name)
+	assert.Equal(t, legacy.GetOffset(), mimo.GetOffset(), "%s: response Offset mismatch", name)
 
-	mimoByID := make(map[string]*pb.Transfer, len(mimo.Transfers))
-	for _, t := range mimo.Transfers {
-		mimoByID[t.Id] = t
+	mimoByID := make(map[string]*pb.Transfer, len(mimo.GetTransfers()))
+	for _, t := range mimo.GetTransfers() {
+		mimoByID[t.GetId()] = t
 	}
-	for _, lt := range legacy.Transfers {
-		mt, ok := mimoByID[lt.Id]
-		require.True(t, ok, "%s: transfer %s in legacy response missing from MIMO", name, lt.Id)
-		assert.Equal(t, lt.Status, mt.Status, "%s: transfer %s Status mismatch", name, lt.Id)
-		assert.Equal(t, lt.Type, mt.Type, "%s: transfer %s Type mismatch", name, lt.Id)
-		assert.Equal(t, lt.Network, mt.Network, "%s: transfer %s Network mismatch", name, lt.Id)
+	for _, lt := range legacy.GetTransfers() {
+		mt, ok := mimoByID[lt.GetId()]
+		require.True(t, ok, "%s: transfer %s in legacy response missing from MIMO", name, lt.GetId())
+		assert.Equal(t, lt.GetStatus(), mt.GetStatus(), "%s: transfer %s Status mismatch", name, lt.GetId())
+		assert.Equal(t, lt.GetType(), mt.GetType(), "%s: transfer %s Type mismatch", name, lt.GetId())
+		assert.Equal(t, lt.GetNetwork(), mt.GetNetwork(), "%s: transfer %s Network mismatch", name, lt.GetId())
 		assert.ElementsMatch(t, leafIDSetOf(lt), leafIDSetOf(mt),
-			"%s: transfer %s leaf-id set mismatch (legacy uses MarshalProto, MIMO uses MarshalProtoForReceiver — single-receiver should be equivalent)", name, lt.Id)
+			"%s: transfer %s leaf-id set mismatch (legacy uses MarshalProto, MIMO uses MarshalProtoForReceiver — single-receiver should be equivalent)", name, lt.GetId())
 	}
 }
 
@@ -513,14 +513,14 @@ func TestQueryPendingTransfers_Equivalence(t *testing.T) {
 	// has 5 pending receivers — one per pendingPair; any will do.
 	resp, err := f.handler.QueryPendingTransfers(f.ctxForWallet(f.light, 0), receiverFilter(f.light))
 	require.NoError(t, err)
-	require.NotEmpty(t, resp.Transfers, "fixture should produce light-pending transfers")
-	lightTransferID := resp.Transfers[0].Id
+	require.NotEmpty(t, resp.GetTransfers(), "fixture should produce light-pending transfers")
+	lightTransferID := resp.GetTransfers()[0].GetId()
 	otherWalletTransferIDs := make([]string, 0, 3)
-	for i, tr := range resp.Transfers {
+	for i, tr := range resp.GetTransfers() {
 		if i >= 3 {
 			break
 		}
-		otherWalletTransferIDs = append(otherWalletTransferIDs, tr.Id)
+		otherWalletTransferIDs = append(otherWalletTransferIDs, tr.GetId())
 	}
 
 	cases := []struct {
@@ -635,7 +635,7 @@ func TestQueryPendingTransfers_Equivalence_Access_SessionMatches(t *testing.T) {
 
 	legacy, mimo, lerr, merr := f.runBothPaths(f.light, receiverFilter(f.light))
 	assertResultsEquivalent(t, "access_session_matches", legacy, mimo, lerr, merr)
-	assert.NotEmpty(t, legacy.Transfers, "expected non-empty result when session matches")
+	assert.NotEmpty(t, legacy.GetTransfers(), "expected non-empty result when session matches")
 }
 
 func TestQueryPendingTransfers_Equivalence_Access_SessionMismatch(t *testing.T) {
@@ -653,8 +653,8 @@ func TestQueryPendingTransfers_Equivalence_Access_SessionMismatch(t *testing.T) 
 	respMIMO, errMIMO := f.handler.QueryPendingTransfers(ctxMIMO, receiverFilter(f.light))
 
 	assertResultsEquivalent(t, "access_session_mismatch", respLegacy, respMIMO, errLegacy, errMIMO)
-	assert.Empty(t, respLegacy.Transfers, "expected empty result on session mismatch")
-	assert.Equal(t, int64(-1), respLegacy.Offset, "expected Offset=-1 on session mismatch")
+	assert.Empty(t, respLegacy.GetTransfers(), "expected empty result on session mismatch")
+	assert.Equal(t, int64(-1), respLegacy.GetOffset(), "expected Offset=-1 on session mismatch")
 }
 
 func TestQueryPendingTransfers_Equivalence_Access_NoSession(t *testing.T) {
@@ -681,7 +681,7 @@ func TestQueryPendingTransfers_Equivalence_Access_NoSession(t *testing.T) {
 	respMIMO, errMIMO := f.handler.QueryPendingTransfers(ctxMIMO, receiverFilter(f.light))
 
 	assertResultsEquivalent(t, "access_no_session", respLegacy, respMIMO, errLegacy, errMIMO)
-	assert.Empty(t, respLegacy.Transfers, "expected empty result with no session + privacy enabled")
+	assert.Empty(t, respLegacy.GetTransfers(), "expected empty result with no session + privacy enabled")
 }
 
 // -----------------------------------------------------------------------------
@@ -711,10 +711,10 @@ func TestQueryPendingTransfers_Equivalence_MultiReceiver(t *testing.T) {
 	assertResultsEquivalent(t, "multi_receiver_primary", legacy, mimo, lerr, merr)
 
 	// Sanity: the multi-receiver transfer is in both responses.
-	require.Len(t, legacy.Transfers, 1)
-	require.Len(t, mimo.Transfers, 1)
-	assert.Equal(t, f.multiReceiverTransferID.String(), legacy.Transfers[0].Id)
-	assert.Equal(t, f.multiReceiverTransferID.String(), mimo.Transfers[0].Id)
+	require.Len(t, legacy.GetTransfers(), 1)
+	require.Len(t, mimo.GetTransfers(), 1)
+	assert.Equal(t, f.multiReceiverTransferID.String(), legacy.GetTransfers()[0].GetId())
+	assert.Equal(t, f.multiReceiverTransferID.String(), mimo.GetTransfers()[0].GetId())
 }
 
 // -----------------------------------------------------------------------------
@@ -745,7 +745,7 @@ func TestQueryPendingTransfers_Equivalence_PaginationCrossKnob(t *testing.T) {
 		withLimitOffset(receiverFilter(f.medium), 2*pageSize, 0),
 	)
 	require.NoError(t, err)
-	require.Len(t, full.Transfers, 2*pageSize, "fixture should provide at least 10 medium-pending transfers")
+	require.Len(t, full.GetTransfers(), 2*pageSize, "fixture should provide at least 10 medium-pending transfers")
 	fullIDs := transferIDsOf(full)
 
 	// Page 1 under legacy.
@@ -804,7 +804,7 @@ func (f *equivFixture) crossKnobPaginationCheck(t *testing.T, viewer keys.Public
 		withLimitOffset(filter, int64(pageSize*pageCount), 0),
 	)
 	require.NoError(t, err)
-	require.Lenf(t, full.Transfers, pageSize*pageCount,
+	require.Lenf(t, full.GetTransfers(), pageSize*pageCount,
 		"fixture must produce >= %d pending transfers for cross-knob pagination", pageSize*pageCount)
 	fullIDs := transferIDsOf(full)
 
@@ -989,12 +989,12 @@ func TestQueryPendingTransfers_Equivalence_TiedCreateTime(t *testing.T) {
 
 	respASC, err := f.handler.QueryPendingTransfers(mimoCtx, withOrder(receiverFilter(receiver), pb.Order_ASCENDING))
 	require.NoError(t, err)
-	require.Len(t, respASC.Transfers, tieCount)
+	require.Len(t, respASC.GetTransfers(), tieCount)
 	idsASC := transferIDsOf(respASC)
 
 	respDESC, err := f.handler.QueryPendingTransfers(mimoCtx, withOrder(receiverFilter(receiver), pb.Order_DESCENDING))
 	require.NoError(t, err)
-	require.Len(t, respDESC.Transfers, tieCount)
+	require.Len(t, respDESC.GetTransfers(), tieCount)
 	idsDESC := transferIDsOf(respDESC)
 
 	// MIMO must be self-consistent across order direction on ties.
@@ -1203,8 +1203,8 @@ func (f *equivFixture) runBothPathsAllTransfers(viewer keys.Public, filter *pb.T
 
 func withOutgoingInFlightStatuses(filter *pb.TransferFilter, statuses ...pb.TransferStatus) *pb.TransferFilter {
 	return &pb.TransferFilter{
-		Participant: filter.Participant,
-		Network:     filter.Network,
+		Participant: filter.GetParticipant(),
+		Network:     filter.GetNetwork(),
 		Statuses:    statuses,
 	}
 }
@@ -1860,8 +1860,8 @@ func TestQueryAllTransfers_ReceiverByTypeStatus_PerReceiverCompletedDivergence(t
 	resp, err := f.handler.QueryAllTransfers(ctx, filter, false)
 	require.NoError(t, err)
 	require.NotNil(t, resp)
-	require.Len(t, resp.Transfers, 1, "completed receiver should see the transfer despite parent t.status != COMPLETED")
-	assert.Equal(t, transfer.ID.String(), resp.Transfers[0].Id)
+	require.Len(t, resp.GetTransfers(), 1, "completed receiver should see the transfer despite parent t.status != COMPLETED")
+	assert.Equal(t, transfer.ID.String(), resp.GetTransfers()[0].GetId())
 }
 
 // TestQueryAllTransfers_ReceiverByTypeStatus_PerReceiverPostTweakDivergence
@@ -1938,8 +1938,8 @@ func TestQueryAllTransfers_ReceiverByTypeStatus_PerReceiverPostTweakDivergence(t
 			resp, err := f.handler.QueryAllTransfers(ctx, filter, false)
 			require.NoError(t, err)
 			require.NotNil(t, resp)
-			require.Len(t, resp.Transfers, 1, "advanced receiver should see the transfer despite lagging parent t.status")
-			assert.Equal(t, transfer.ID.String(), resp.Transfers[0].Id)
+			require.Len(t, resp.GetTransfers(), 1, "advanced receiver should see the transfer despite lagging parent t.status")
+			assert.Equal(t, transfer.ID.String(), resp.GetTransfers()[0].GetId())
 		})
 	}
 }
@@ -2397,7 +2397,7 @@ func TestQueryAllTransfers_ByParticipantFallback_PerReceiverDivergence(t *testin
 	ctxMIMO := f.ctxForByParticipantFallback(completedReceiver, 100)
 	mimoResp, err := f.handler.QueryAllTransfers(ctxMIMO, filter, false)
 	require.NoError(t, err)
-	require.Len(t, mimoResp.Transfers, 1,
+	require.Len(t, mimoResp.GetTransfers(), 1,
 		"fallback surfaces the completed receiver despite parent t.status lag")
-	assert.Equal(t, transfer.ID.String(), mimoResp.Transfers[0].Id)
+	assert.Equal(t, transfer.ID.String(), mimoResp.GetTransfers()[0].GetId())
 }

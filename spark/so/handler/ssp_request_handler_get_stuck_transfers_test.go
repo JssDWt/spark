@@ -163,9 +163,9 @@ func (f *stuckFixture) getStuckTransferIDs(user keys.Public, network pb.Network,
 	}
 	resp, err := f.handler.GetStuckTransfers(f.ctx, req)
 	require.NoError(f.t, err)
-	ids := make([]uuid.UUID, 0, len(resp.Transfers))
-	for _, st := range resp.Transfers {
-		id, err := uuid.Parse(st.Transfer.Id)
+	ids := make([]uuid.UUID, 0, len(resp.GetTransfers()))
+	for _, st := range resp.GetTransfers() {
+		id, err := uuid.Parse(st.GetTransfer().GetId())
 		require.NoError(f.t, err)
 		ids = append(ids, id)
 	}
@@ -467,7 +467,7 @@ func TestGetStuckTransfers_MIMO_BeforeCutoff(t *testing.T) {
 		Limit:                 50,
 	})
 	require.NoError(t, err)
-	require.Len(t, resp.Transfers, 2)
+	require.Len(t, resp.GetTransfers(), 2)
 
 	// Tighter cutoff (now - 2h) excludes the 90-minute-old row, leaving only the 3h-old.
 	resp, err = f.handler.GetStuckTransfers(f.ctx, &pbssp.GetStuckTransfersRequest{
@@ -477,9 +477,9 @@ func TestGetStuckTransfers_MIMO_BeforeCutoff(t *testing.T) {
 		Limit:                 50,
 	})
 	require.NoError(t, err)
-	require.Len(t, resp.Transfers, 1)
-	assert.Equal(t, old.ID.String(), resp.Transfers[0].Transfer.Id)
-	assert.NotEqual(t, recent.ID.String(), resp.Transfers[0].Transfer.Id)
+	require.Len(t, resp.GetTransfers(), 1)
+	assert.Equal(t, old.ID.String(), resp.GetTransfers()[0].GetTransfer().GetId())
+	assert.NotEqual(t, recent.ID.String(), resp.GetTransfers()[0].GetTransfer().GetId())
 }
 
 // -----------------------------------------------------------------------------
@@ -606,9 +606,9 @@ func (f *stuckFixture) getAllStuckTransferIDs(network pb.Network, limit, offset 
 	}
 	resp, err := f.handler.GetStuckTransfers(f.ctx, req)
 	require.NoError(f.t, err)
-	ids := make([]uuid.UUID, 0, len(resp.Transfers))
-	for _, stp := range resp.Transfers {
-		id, err := uuid.Parse(stp.Transfer.Id)
+	ids := make([]uuid.UUID, 0, len(resp.GetTransfers()))
+	for _, stp := range resp.GetTransfers() {
+		id, err := uuid.Parse(stp.GetTransfer().GetId())
 		require.NoError(f.t, err)
 		ids = append(ids, id)
 	}
@@ -793,7 +793,7 @@ func TestGetStuckTransfers_MIMO_NoPubkey_BeforeCutoff(t *testing.T) {
 		Limit:   50,
 	})
 	require.NoError(t, err)
-	require.Len(t, resp.Transfers, 2)
+	require.Len(t, resp.GetTransfers(), 2)
 
 	// Tighter cutoff (now - 2h) excludes the 90-minute-old row, leaving only the 3h-old.
 	resp, err = f.handler.GetStuckTransfers(f.ctx, &pbssp.GetStuckTransfersRequest{
@@ -802,9 +802,9 @@ func TestGetStuckTransfers_MIMO_NoPubkey_BeforeCutoff(t *testing.T) {
 		Limit:   50,
 	})
 	require.NoError(t, err)
-	require.Len(t, resp.Transfers, 1)
-	assert.Equal(t, old.ID.String(), resp.Transfers[0].Transfer.Id)
-	assert.NotEqual(t, recent.ID.String(), resp.Transfers[0].Transfer.Id)
+	require.Len(t, resp.GetTransfers(), 1)
+	assert.Equal(t, old.ID.String(), resp.GetTransfers()[0].GetTransfer().GetId())
+	assert.NotEqual(t, recent.ID.String(), resp.GetTransfers()[0].GetTransfer().GetId())
 }
 
 // TestGetStuckTransfers_MIMO_NoPubkey_OrderedByCreateTimeDesc verifies the
@@ -922,9 +922,9 @@ func assertStuckTransferKeyshare(t *testing.T, f *stuckFixture, stuck *pbssp.Stu
 	require.Len(t, leaves, 1)
 	leafID := leaves[0].ID.String()
 
-	require.Contains(t, stuck.SigningKeysharePublicShares, leafID,
+	require.Contains(t, stuck.GetSigningKeysharePublicShares(), leafID,
 		"expected SigningKeysharePublicShares to include entry for attached leaf")
-	assert.NotEmpty(t, stuck.SigningKeysharePublicShares[leafID].PublicShares,
+	assert.NotEmpty(t, stuck.GetSigningKeysharePublicShares()[leafID].GetPublicShares(),
 		"expected non-empty PublicShares for leaf")
 }
 
@@ -944,9 +944,9 @@ func TestGetStuckTransfers_MIMO_IncludesSigningKeyshares(t *testing.T) {
 		Limit:                 50,
 	})
 	require.NoError(t, err)
-	require.Len(t, resp.Transfers, 1)
-	require.Equal(t, transfer.ID.String(), resp.Transfers[0].Transfer.Id)
-	assertStuckTransferKeyshare(t, f, resp.Transfers[0], transfer)
+	require.Len(t, resp.GetTransfers(), 1)
+	require.Equal(t, transfer.ID.String(), resp.GetTransfers()[0].GetTransfer().GetId())
+	assertStuckTransferKeyshare(t, f, resp.GetTransfers()[0], transfer)
 }
 
 func TestGetStuckTransfers_Legacy_IncludesSigningKeyshares(t *testing.T) {
@@ -969,9 +969,9 @@ func TestGetStuckTransfers_Legacy_IncludesSigningKeyshares(t *testing.T) {
 		Limit:                 50,
 	})
 	require.NoError(t, err)
-	require.Len(t, resp.Transfers, 1)
-	require.Equal(t, transfer.ID.String(), resp.Transfers[0].Transfer.Id)
-	assertStuckTransferKeyshare(t, f, resp.Transfers[0], transfer)
+	require.Len(t, resp.GetTransfers(), 1)
+	require.Equal(t, transfer.ID.String(), resp.GetTransfers()[0].GetTransfer().GetId())
+	assertStuckTransferKeyshare(t, f, resp.GetTransfers()[0], transfer)
 }
 
 func TestQueryStuckTransfer_IncludesSigningKeyshares(t *testing.T) {
@@ -989,7 +989,7 @@ func TestQueryStuckTransfer_IncludesSigningKeyshares(t *testing.T) {
 		Id: transfer.ID.String(),
 	})
 	require.NoError(t, err)
-	require.NotNil(t, resp.Transfer)
-	require.Equal(t, transfer.ID.String(), resp.Transfer.Transfer.Id)
-	assertStuckTransferKeyshare(t, f, resp.Transfer, transfer)
+	require.NotNil(t, resp.GetTransfer())
+	require.Equal(t, transfer.ID.String(), resp.GetTransfer().GetTransfer().GetId())
+	assertStuckTransferKeyshare(t, f, resp.GetTransfer(), transfer)
 }

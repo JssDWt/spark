@@ -69,7 +69,7 @@ func TestApplySenderKeyTweaks_RecoversApplyingSenderKeyTweak(t *testing.T) {
 		TransferIds: []string{transfer.ID.String()},
 	})
 	require.NoError(t, err)
-	require.Equal(t, []string{transfer.ID.String()}, resp.UpdatedTransferIds)
+	require.Equal(t, []string{transfer.ID.String()}, resp.GetUpdatedTransferIds())
 
 	readDb, err := ent.GetDbFromContext(ctx)
 	require.NoError(t, err)
