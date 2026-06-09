@@ -355,6 +355,66 @@ func TestSettleSenderKeyTweak_Commit_PreimageSwapRequiresStoredMatchingPreimage(
 	}
 }
 
+func TestSettleSenderKeyTweak_Commit_SwapV3RequiresAtomicSwapCommit(t *testing.T) {
+	ctx, dbCtx := db.ConnectToTestPostgres(t)
+	cfg := sparktesting.TestConfig(t)
+	rng := rand.NewChaCha8([32]byte{124})
+
+	primary, counter := createSwapV3PendingSenderKeyTweakTransfersForTest(t, ctx, dbCtx.Client, cfg, rng)
+	handler := NewInternalTransferHandler(cfg)
+
+	err := handler.SettleSenderKeyTweak(ctx, &pbinternal.SettleSenderKeyTweakRequest{
+		TransferId: primary.ID.String(),
+		Action:     pbinternal.SettleKeyTweakAction_COMMIT,
+	})
+	require.ErrorContains(t, err, "swap v3 sender key tweaks must be committed atomically")
+	assertTransferStillPendingSenderKeyTweak(t, ctx, dbCtx.Client, primary.ID)
+	assertTransferStillPendingSenderKeyTweak(t, ctx, dbCtx.Client, counter.ID)
+
+	err = handler.SettleSenderKeyTweak(ctx, &pbinternal.SettleSenderKeyTweakRequest{
+		TransferId: counter.ID.String(),
+		Action:     pbinternal.SettleKeyTweakAction_COMMIT,
+	})
+	require.ErrorContains(t, err, "swap v3 sender key tweaks must be committed atomically")
+	assertTransferStillPendingSenderKeyTweak(t, ctx, dbCtx.Client, primary.ID)
+	assertTransferStillPendingSenderKeyTweak(t, ctx, dbCtx.Client, counter.ID)
+
+	baseHandler := NewBaseTransferHandler(cfg)
+	require.NoError(t, baseHandler.CommitSwapKeyTweaks(ctx, counter.ID))
+	assertTransferCommittedSenderKeyTweak(t, ctx, dbCtx.Client, primary.ID)
+	assertTransferCommittedSenderKeyTweak(t, ctx, dbCtx.Client, counter.ID)
+
+	// Duplicate gossip delivery should be idempotent once both legs are committed.
+	require.NoError(t, baseHandler.CommitSwapKeyTweaks(ctx, counter.ID))
+	assertTransferCommittedSenderKeyTweak(t, ctx, dbCtx.Client, primary.ID)
+	assertTransferCommittedSenderKeyTweak(t, ctx, dbCtx.Client, counter.ID)
+}
+
+func TestCommitSwapKeyTweaksRejectsTerminalSideWithoutPartialCommit(t *testing.T) {
+	ctx, dbCtx := db.ConnectToTestPostgres(t)
+	cfg := sparktesting.TestConfig(t)
+	rng := rand.NewChaCha8([32]byte{125})
+	baseHandler := NewBaseTransferHandler(cfg)
+
+	primary, counter := createSwapV3PendingSenderKeyTweakTransfersForTest(t, ctx, dbCtx.Client, cfg, rng)
+	_, err := counter.Update().SetStatus(st.TransferStatusExpired).Save(ctx)
+	require.NoError(t, err)
+
+	err = baseHandler.CommitSwapKeyTweaks(ctx, counter.ID)
+	require.ErrorContains(t, err, "counter transfer")
+	assertTransferStillPendingSenderKeyTweak(t, ctx, dbCtx.Client, primary.ID)
+	assertSenderKeyTweakTransferStateForTest(t, ctx, dbCtx.Client, counter.ID, st.TransferStatusExpired, true, false)
+
+	primary, counter = createSwapV3PendingSenderKeyTweakTransfersForTest(t, ctx, dbCtx.Client, cfg, rng)
+	_, err = primary.Update().SetStatus(st.TransferStatusExpired).Save(ctx)
+	require.NoError(t, err)
+
+	err = baseHandler.CommitSwapKeyTweaks(ctx, counter.ID)
+	require.ErrorContains(t, err, "primary transfer")
+	assertSenderKeyTweakTransferStateForTest(t, ctx, dbCtx.Client, primary.ID, st.TransferStatusExpired, true, false)
+	assertTransferStillPendingSenderKeyTweak(t, ctx, dbCtx.Client, counter.ID)
+}
+
 func TestCommitSenderKeyTweaks_RejectsNilProofValue(t *testing.T) {
 	ctx, dbCtx := db.ConnectToTestPostgres(t)
 	cfg := sparktesting.TestConfig(t)
@@ -523,6 +583,156 @@ func TestValidateKeyTweakProofRejectsNilProofValue(t *testing.T) {
 		})
 	})
 	require.ErrorContains(t, validateErr, "key tweak proof value is nil")
+}
+
+func createSwapV3PendingSenderKeyTweakTransfersForTest(
+	t *testing.T,
+	ctx context.Context,
+	client *ent.Client,
+	cfg *so.Config,
+	rng *rand.ChaCha8,
+) (*ent.Transfer, *ent.Transfer) {
+	t.Helper()
+
+	alice := keys.MustGeneratePrivateKeyFromRand(rng).Public()
+	bob := keys.MustGeneratePrivateKeyFromRand(rng).Public()
+
+	primary := createSwapV3PendingSenderKeyTweakTransferForTest(t, ctx, client, cfg, rng, st.TransferTypePrimarySwapV3, alice, bob, nil, 10_000)
+	counter := createSwapV3PendingSenderKeyTweakTransferForTest(t, ctx, client, cfg, rng, st.TransferTypeCounterSwapV3, bob, alice, primary, 20_000)
+	return primary, counter
+}
+
+func createSwapV3PendingSenderKeyTweakTransferForTest(
+	t *testing.T,
+	ctx context.Context,
+	client *ent.Client,
+	cfg *so.Config,
+	rng *rand.ChaCha8,
+	transferType st.TransferType,
+	sender keys.Public,
+	receiver keys.Public,
+	primary *ent.Transfer,
+	txValue int64,
+) *ent.Transfer {
+	t.Helper()
+
+	keysharePrivKey := keys.MustGeneratePrivateKeyFromRand(rng)
+	publicSharePrivKey := keys.MustGeneratePrivateKeyFromRand(rng)
+	signingKeyshare, err := client.SigningKeyshare.Create().
+		SetStatus(st.KeyshareStatusAvailable).
+		SetSecretShare(keysharePrivKey).
+		SetPublicShares(map[string]keys.Public{cfg.Identifier: publicSharePrivKey.Public()}).
+		SetPublicKey(keysharePrivKey.Public()).
+		SetMinSigners(2).
+		SetCoordinatorIndex(0).
+		Save(ctx)
+	require.NoError(t, err)
+
+	tree, err := client.Tree.Create().
+		SetStatus(st.TreeStatusAvailable).
+		SetNetwork(btcnetwork.Regtest).
+		SetOwnerIdentityPubkey(sender).
+		SetBaseTxid(st.NewRandomTxIDForTesting(t)).
+		SetVout(0).
+		Save(ctx)
+	require.NoError(t, err)
+
+	leaf, err := client.TreeNode.Create().
+		SetStatus(st.TreeNodeStatusAvailable).
+		SetTree(tree).
+		SetNetwork(tree.Network).
+		SetSigningKeyshare(signingKeyshare).
+		SetValue(1000).
+		SetVerifyingPubkey(keys.MustGeneratePrivateKeyFromRand(rng).Public()).
+		SetOwnerIdentityPubkey(sender).
+		SetOwnerSigningPubkey(keys.MustGeneratePrivateKeyFromRand(rng).Public()).
+		SetRawTx(createTestTxBytes(t, txValue)).
+		SetRawRefundTx(createTestTxBytes(t, txValue+1)).
+		SetVout(0).
+		Save(ctx)
+	require.NoError(t, err)
+
+	transferCreate := client.Transfer.Create().
+		SetNetwork(btcnetwork.Regtest).
+		SetStatus(st.TransferStatusSenderKeyTweakPending).
+		SetType(transferType).
+		SetSenderIdentityPubkey(sender).
+		SetReceiverIdentityPubkey(receiver).
+		SetTotalValue(1000).
+		SetExpiryTime(time.Now().Add(time.Hour))
+	if primary != nil {
+		transferCreate.SetPrimarySwapTransfer(primary)
+	}
+	transfer, err := transferCreate.Save(ctx)
+	require.NoError(t, err)
+
+	secretShare, pubkeySharesTweak := createValidSecretShares(cfg, rng)
+	keyTweakBytes, err := proto.Marshal(&sparkProto.SendLeafKeyTweak{
+		LeafId:            leaf.ID.String(),
+		SecretShareTweak:  secretShare,
+		PubkeySharesTweak: pubkeySharesTweak,
+		SecretCipher:      []byte("encrypted-secret-share"),
+		Signature:         []byte("mock-key-tweak-signature"),
+	})
+	require.NoError(t, err)
+
+	_, err = client.TransferLeaf.Create().
+		SetTransfer(transfer).
+		SetLeaf(leaf).
+		SetPreviousRefundTx(createTestTxBytes(t, txValue+2)).
+		SetIntermediateRefundTx(createTestTxBytes(t, txValue+3)).
+		SetKeyTweak(keyTweakBytes).
+		Save(ctx)
+	require.NoError(t, err)
+
+	return transfer
+}
+
+func assertTransferStillPendingSenderKeyTweak(t *testing.T, ctx context.Context, client *ent.Client, transferID uuid.UUID) {
+	t.Helper()
+
+	assertSenderKeyTweakTransferStateForTest(t, ctx, client, transferID, st.TransferStatusSenderKeyTweakPending, true, false)
+}
+
+func assertTransferCommittedSenderKeyTweak(t *testing.T, ctx context.Context, client *ent.Client, transferID uuid.UUID) {
+	t.Helper()
+
+	assertSenderKeyTweakTransferStateForTest(t, ctx, client, transferID, st.TransferStatusSenderKeyTweaked, false, true)
+}
+
+func assertSenderKeyTweakTransferStateForTest(
+	t *testing.T,
+	ctx context.Context,
+	client *ent.Client,
+	transferID uuid.UUID,
+	status st.TransferStatus,
+	wantKeyTweak bool,
+	wantCommittedMaterial bool,
+) {
+	t.Helper()
+
+	if dbFromCtx, err := ent.GetDbFromContext(ctx); err == nil {
+		client = dbFromCtx
+	}
+	transfer, err := client.Transfer.Get(ctx, transferID)
+	require.NoError(t, err)
+	assert.Equal(t, status, transfer.Status)
+
+	leaves, err := transfer.QueryTransferLeaves().All(ctx)
+	require.NoError(t, err)
+	require.Len(t, leaves, 1)
+	if wantKeyTweak {
+		assert.NotEmpty(t, leaves[0].KeyTweak)
+	} else {
+		assert.Empty(t, leaves[0].KeyTweak)
+	}
+	if wantCommittedMaterial {
+		assert.NotEmpty(t, leaves[0].SecretCipher)
+		assert.NotEmpty(t, leaves[0].Signature)
+	} else {
+		assert.Empty(t, leaves[0].SecretCipher)
+		assert.Empty(t, leaves[0].Signature)
+	}
 }
 
 func TestDeliverSenderKeyTweak_MissingKeyTweakForLeaf(t *testing.T) {
