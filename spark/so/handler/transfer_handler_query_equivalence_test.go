@@ -235,14 +235,14 @@ func (f *equivFixture) privacyEnabled(pubkeys ...keys.Public) {
 }
 
 // ctxForWallet returns a context authenticated as the given pubkey with the
-// knob set for the given path (legacy=0, MIMO=100). Other knobs are pinned
-// to production-relevant values so the two paths are compared like-for-like.
+// path-selector knob set (legacy=0, MIMO=100). Other knobs match prod —
+// KnobReadMIMOMultiParticipantFormat=100 keeps the marshal layer in strict mode.
 func (f *equivFixture) ctxForWallet(viewer keys.Public, mimoKnob float64) context.Context {
 	ctx := authn.InjectSessionForTests(f.ctx, hex.EncodeToString(viewer.Serialize()), 9999999999)
 	return knobs.InjectKnobsService(ctx, knobs.NewFixedKnobs(map[string]float64{
 		knobs.KnobPrivacyEnabled:                         100,
 		knobs.KnobReadMIMODataModelQueryPendingTransfers: mimoKnob,
-		knobs.KnobReadMIMOMultiParticipantFormat:         0,
+		knobs.KnobReadMIMOMultiParticipantFormat:         100,
 	}))
 }
 
@@ -667,7 +667,7 @@ func TestQueryPendingTransfers_Equivalence_Access_NoSession(t *testing.T) {
 	noSessionKnobs := knobs.NewFixedKnobs(map[string]float64{
 		knobs.KnobPrivacyEnabled:                         100,
 		knobs.KnobReadMIMODataModelQueryPendingTransfers: 0,
-		knobs.KnobReadMIMOMultiParticipantFormat:         0,
+		knobs.KnobReadMIMOMultiParticipantFormat:         100,
 	})
 	ctxLegacy := knobs.InjectKnobsService(f.ctx, noSessionKnobs)
 	respLegacy, errLegacy := f.handler.QueryPendingTransfers(ctxLegacy, receiverFilter(f.light))
@@ -675,7 +675,7 @@ func TestQueryPendingTransfers_Equivalence_Access_NoSession(t *testing.T) {
 	mimoKnobs := knobs.NewFixedKnobs(map[string]float64{
 		knobs.KnobPrivacyEnabled:                         100,
 		knobs.KnobReadMIMODataModelQueryPendingTransfers: 100,
-		knobs.KnobReadMIMOMultiParticipantFormat:         0,
+		knobs.KnobReadMIMOMultiParticipantFormat:         100,
 	})
 	ctxMIMO := knobs.InjectKnobsService(f.ctx, mimoKnobs)
 	respMIMO, errMIMO := f.handler.QueryPendingTransfers(ctxMIMO, receiverFilter(f.light))
@@ -1183,7 +1183,7 @@ func (f *equivFixture) ctxForOutgoingInFlight(viewer keys.Public, mimoKnob float
 	return knobs.InjectKnobsService(ctx, knobs.NewFixedKnobs(map[string]float64{
 		knobs.KnobPrivacyEnabled:                    100,
 		knobs.KnobReadMIMODataModelOutgoingInFlight: mimoKnob,
-		knobs.KnobReadMIMOMultiParticipantFormat:    0,
+		knobs.KnobReadMIMOMultiParticipantFormat:    100,
 	}))
 }
 
@@ -1339,7 +1339,7 @@ func (f *equivFixture) ctxForByTypes(viewer keys.Public, mimoKnob float64) conte
 	return knobs.InjectKnobsService(ctx, knobs.NewFixedKnobs(map[string]float64{
 		knobs.KnobPrivacyEnabled:                 100,
 		knobs.KnobReadMIMODataModelQueryByTypes:  mimoKnob,
-		knobs.KnobReadMIMOMultiParticipantFormat: 0,
+		knobs.KnobReadMIMOMultiParticipantFormat: 100,
 	}))
 }
 
@@ -1574,7 +1574,7 @@ func (f *equivFixture) ctxForReceiverByTypeStatus(viewer keys.Public, mimoKnob f
 	return knobs.InjectKnobsService(ctx, knobs.NewFixedKnobs(map[string]float64{
 		knobs.KnobPrivacyEnabled:                        100,
 		knobs.KnobReadMIMODataModelReceiverByTypeStatus: mimoKnob,
-		knobs.KnobReadMIMOMultiParticipantFormat:        0,
+		knobs.KnobReadMIMOMultiParticipantFormat:        100,
 	}))
 }
 
@@ -1949,7 +1949,7 @@ func (f *equivFixture) ctxForCounterSwap(viewer keys.Public, mimoKnob float64) c
 	return knobs.InjectKnobsService(ctx, knobs.NewFixedKnobs(map[string]float64{
 		knobs.KnobPrivacyEnabled:                 100,
 		knobs.KnobReadMIMODataModelCounterSwap:   mimoKnob,
-		knobs.KnobReadMIMOMultiParticipantFormat: 0,
+		knobs.KnobReadMIMOMultiParticipantFormat: 100,
 	}))
 }
 
@@ -2219,7 +2219,7 @@ func (f *equivFixture) ctxForByParticipantFallback(viewer keys.Public, mimoKnob 
 	return knobs.InjectKnobsService(ctx, knobs.NewFixedKnobs(map[string]float64{
 		knobs.KnobPrivacyEnabled:                         100,
 		knobs.KnobReadMIMODataModelByParticipantFallback: mimoKnob,
-		knobs.KnobReadMIMOMultiParticipantFormat:         0,
+		knobs.KnobReadMIMOMultiParticipantFormat:         100,
 	}))
 }
 
