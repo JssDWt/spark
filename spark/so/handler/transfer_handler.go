@@ -975,6 +975,37 @@ func (h *TransferHandler) CounterLeafSwapV2(ctx context.Context, req *pb.Counter
 	return &pb.CounterLeafSwapResponse{Transfer: startTransferResponse.GetTransfer(), SigningResults: startTransferResponse.GetSigningResults()}, nil
 }
 
+// CounterLeafSwapV3 initiates the counter side of a Swap V3, linking to the
+// primary transfer (swap_id) so the SOs atomically commit both transfers' sender
+// key tweaks. The counter refunds are signed against the adaptor public keys.
+func (h *TransferHandler) CounterLeafSwapV3(ctx context.Context, req *pb.CounterLeafSwapRequest) (*pb.CounterLeafSwapResponse, error) {
+	adaptorPublicKey, err := keys.ParsePublicKey(req.GetAdaptorPublicKey())
+	if err != nil {
+		return nil, fmt.Errorf("unable to parse adaptor public key: %w", err)
+	}
+	directAdaptorPublicKey, err := parsePublicKeyIfPresent(req.GetDirectAdaptorPublicKey())
+	if err != nil {
+		return nil, fmt.Errorf("unable to parse direct adaptor public key: %w", err)
+	}
+	directFromCpfpAdaptorPublicKey, err := parsePublicKeyIfPresent(req.GetDirectFromCpfpAdaptorPublicKey())
+	if err != nil {
+		return nil, fmt.Errorf("unable to parse direct from cpfp adaptor public key: %w", err)
+	}
+	primaryTransferID, err := uuid.Parse(req.GetSwapId())
+	if err != nil {
+		return nil, fmt.Errorf("unable to parse swap id as primary transfer id: %w", err)
+	}
+	startTransferResponse, err := h.StartCounterTransferInternal(ctx, req.GetTransfer(), TransferAdaptorPublicKeys{
+		cpfpAdaptorPubKey:           adaptorPublicKey,
+		directAdaptorPubKey:         directAdaptorPublicKey,
+		directFromCpfpAdaptorPubKey: directFromCpfpAdaptorPublicKey,
+	}, primaryTransferID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to start counter leaf swap v3 for request %s: %w", logging.FormatProto("counter_leaf_swap_request", req), err)
+	}
+	return &pb.CounterLeafSwapResponse{Transfer: startTransferResponse.GetTransfer(), SigningResults: startTransferResponse.GetSigningResults()}, nil
+}
+
 func parsePublicKeyIfPresent(raw []byte) (keys.Public, error) {
 	if len(raw) == 0 {
 		return keys.Public{}, nil

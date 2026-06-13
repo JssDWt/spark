@@ -214,6 +214,12 @@ func (s *SparkServer) CounterLeafSwapV2(ctx context.Context, req *pb.CounterLeaf
 	return nil, errors.UnimplementedMethodDisabled(errDeprecated)
 }
 
+// CounterLeafSwapV3 starts the counter side of a Swap V3 between a user and the SSP.
+func (s *SparkServer) CounterLeafSwapV3(ctx context.Context, req *pb.CounterLeafSwapRequest) (*pb.CounterLeafSwapResponse, error) {
+	transferHandler := handler.NewTransferHandler(s.config)
+	return transferHandler.CounterLeafSwapV3(ctx, req)
+}
+
 // RefreshTimelock refreshes the timelocks of a leaf and its ancestors.
 func (s *SparkServer) RefreshTimelock(ctx context.Context, req *pb.RefreshTimelockRequest) (*pb.RefreshTimelockResponse, error) {
 	return nil, errors.UnimplementedMethodDisabled(errDeprecated)

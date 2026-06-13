@@ -91,6 +91,12 @@ service SparkService {
     // It will be done later, when the SSP initiates a counter swap.
     rpc initiate_swap_primary_transfer(InitiateSwapPrimaryTransferRequest) returns (InitiateSwapPrimaryTransferResponse) {}
 
+    // Initiates the counter transfer of a Swap V3 protocol. The SSP submits its
+    // counter transfer package linked to the primary transfer (swap_id). The SOs
+    // atomically commit the sender key tweaks of both the primary and counter
+    // transfers, so neither party can take leaves without giving leaves in return.
+    rpc counter_leaf_swap_v3(CounterLeafSwapRequest) returns (CounterLeafSwapResponse) {}
+
     rpc update_wallet_setting(UpdateWalletSettingRequest) returns (UpdateWalletSettingResponse) {}
     rpc query_wallet_setting(QueryWalletSettingRequest) returns (QueryWalletSettingResponse) {}
 

@@ -58,6 +58,7 @@ const (
 	SparkService_GetUtxosForIdentity_FullMethodName                 = "/spark.SparkService/get_utxos_for_identity"
 	SparkService_QuerySparkInvoices_FullMethodName                  = "/spark.SparkService/query_spark_invoices"
 	SparkService_InitiateSwapPrimaryTransfer_FullMethodName         = "/spark.SparkService/initiate_swap_primary_transfer"
+	SparkService_CounterLeafSwapV3_FullMethodName                   = "/spark.SparkService/counter_leaf_swap_v3"
 	SparkService_UpdateWalletSetting_FullMethodName                 = "/spark.SparkService/update_wallet_setting"
 	SparkService_QueryWalletSetting_FullMethodName                  = "/spark.SparkService/query_wallet_setting"
 	SparkService_PrepareTreeAddress_FullMethodName                  = "/spark.SparkService/prepare_tree_address"
@@ -126,6 +127,11 @@ type SparkServiceClient interface {
 	// transfer package, but the SOs will not tweak the keys at this stage of the flow.
 	// It will be done later, when the SSP initiates a counter swap.
 	InitiateSwapPrimaryTransfer(ctx context.Context, in *InitiateSwapPrimaryTransferRequest, opts ...grpc.CallOption) (*InitiateSwapPrimaryTransferResponse, error)
+	// Initiates the counter transfer of a Swap V3 protocol. The SSP submits its
+	// counter transfer package linked to the primary transfer (swap_id). The SOs
+	// atomically commit the sender key tweaks of both the primary and counter
+	// transfers, so neither party can take leaves without giving leaves in return.
+	CounterLeafSwapV3(ctx context.Context, in *CounterLeafSwapRequest, opts ...grpc.CallOption) (*CounterLeafSwapResponse, error)
 	UpdateWalletSetting(ctx context.Context, in *UpdateWalletSettingRequest, opts ...grpc.CallOption) (*UpdateWalletSettingResponse, error)
 	QueryWalletSetting(ctx context.Context, in *QueryWalletSettingRequest, opts ...grpc.CallOption) (*QueryWalletSettingResponse, error)
 	PrepareTreeAddress(ctx context.Context, in *PrepareTreeAddressRequest, opts ...grpc.CallOption) (*PrepareTreeAddressResponse, error)
@@ -529,6 +535,16 @@ func (c *sparkServiceClient) InitiateSwapPrimaryTransfer(ctx context.Context, in
 	return out, nil
 }
 
+func (c *sparkServiceClient) CounterLeafSwapV3(ctx context.Context, in *CounterLeafSwapRequest, opts ...grpc.CallOption) (*CounterLeafSwapResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(CounterLeafSwapResponse)
+	err := c.cc.Invoke(ctx, SparkService_CounterLeafSwapV3_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *sparkServiceClient) UpdateWalletSetting(ctx context.Context, in *UpdateWalletSettingRequest, opts ...grpc.CallOption) (*UpdateWalletSettingResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(UpdateWalletSettingResponse)
@@ -631,6 +647,11 @@ type SparkServiceServer interface {
 	// transfer package, but the SOs will not tweak the keys at this stage of the flow.
 	// It will be done later, when the SSP initiates a counter swap.
 	InitiateSwapPrimaryTransfer(context.Context, *InitiateSwapPrimaryTransferRequest) (*InitiateSwapPrimaryTransferResponse, error)
+	// Initiates the counter transfer of a Swap V3 protocol. The SSP submits its
+	// counter transfer package linked to the primary transfer (swap_id). The SOs
+	// atomically commit the sender key tweaks of both the primary and counter
+	// transfers, so neither party can take leaves without giving leaves in return.
+	CounterLeafSwapV3(context.Context, *CounterLeafSwapRequest) (*CounterLeafSwapResponse, error)
 	UpdateWalletSetting(context.Context, *UpdateWalletSettingRequest) (*UpdateWalletSettingResponse, error)
 	QueryWalletSetting(context.Context, *QueryWalletSettingRequest) (*QueryWalletSettingResponse, error)
 	PrepareTreeAddress(context.Context, *PrepareTreeAddressRequest) (*PrepareTreeAddressResponse, error)
@@ -758,6 +779,9 @@ func (UnimplementedSparkServiceServer) QuerySparkInvoices(context.Context, *Quer
 }
 func (UnimplementedSparkServiceServer) InitiateSwapPrimaryTransfer(context.Context, *InitiateSwapPrimaryTransferRequest) (*InitiateSwapPrimaryTransferResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method InitiateSwapPrimaryTransfer not implemented")
+}
+func (UnimplementedSparkServiceServer) CounterLeafSwapV3(context.Context, *CounterLeafSwapRequest) (*CounterLeafSwapResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method CounterLeafSwapV3 not implemented")
 }
 func (UnimplementedSparkServiceServer) UpdateWalletSetting(context.Context, *UpdateWalletSettingRequest) (*UpdateWalletSettingResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method UpdateWalletSetting not implemented")
@@ -1469,6 +1493,24 @@ func _SparkService_InitiateSwapPrimaryTransfer_Handler(srv interface{}, ctx cont
 	return interceptor(ctx, in, info, handler)
 }
 
+func _SparkService_CounterLeafSwapV3_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CounterLeafSwapRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SparkServiceServer).CounterLeafSwapV3(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SparkService_CounterLeafSwapV3_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SparkServiceServer).CounterLeafSwapV3(ctx, req.(*CounterLeafSwapRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _SparkService_UpdateWalletSetting_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(UpdateWalletSettingRequest)
 	if err := dec(in); err != nil {
@@ -1695,6 +1737,10 @@ var SparkService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "initiate_swap_primary_transfer",
 			Handler:    _SparkService_InitiateSwapPrimaryTransfer_Handler,
+		},
+		{
+			MethodName: "counter_leaf_swap_v3",
+			Handler:    _SparkService_CounterLeafSwapV3_Handler,
 		},
 		{
 			MethodName: "update_wallet_setting",
