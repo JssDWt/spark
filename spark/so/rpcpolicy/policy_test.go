@@ -15,6 +15,7 @@ import (
 	pbauthn "github.com/lightsparkdev/spark/proto/spark_authn"
 	pbinternal "github.com/lightsparkdev/spark/proto/spark_internal"
 	pbpartner "github.com/lightsparkdev/spark/proto/spark_partner"
+	pbsspsvc "github.com/lightsparkdev/spark/proto/spark_ssp"
 	pbtoken "github.com/lightsparkdev/spark/proto/spark_token"
 	pbtokeninternal "github.com/lightsparkdev/spark/proto/spark_token_internal"
 )
@@ -25,6 +26,7 @@ var baseRegisteredServiceDescs = []*grpc.ServiceDesc{
 	&pbauthn.SparkAuthnService_ServiceDesc,
 	&pbspark.SparkService_ServiceDesc,
 	&pbpartner.SparkPartnerService_ServiceDesc,
+	&pbsspsvc.SparkSspService_ServiceDesc,
 	&pbinternal.SparkInternalService_ServiceDesc,
 	&pbtoken.SparkTokenService_ServiceDesc,
 	&pbtokeninternal.SparkTokenInternalService_ServiceDesc,

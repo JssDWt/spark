@@ -20,6 +20,7 @@ import (
 	pbauthn "github.com/lightsparkdev/spark/proto/spark_authn"
 	pbinternal "github.com/lightsparkdev/spark/proto/spark_internal"
 	pbpartner "github.com/lightsparkdev/spark/proto/spark_partner"
+	pbsspsvc "github.com/lightsparkdev/spark/proto/spark_ssp"
 	pbtoken "github.com/lightsparkdev/spark/proto/spark_token"
 	pbtokeninternal "github.com/lightsparkdev/spark/proto/spark_token_internal"
 )
@@ -112,12 +113,27 @@ func init() {
 	register(mockServicePolicies())
 	register(healthServicePolicies())
 	register(sparkPartnerServicePolicies())
+	register(sparkSspServicePolicies())
 }
 
 func sparkAuthnPolicies() map[string]Policy {
 	return map[string]Policy{
 		pbauthn.SparkAuthnService_GetChallenge_FullMethodName:    {AuthMode: AuthAnonymous},
 		pbauthn.SparkAuthnService_VerifyChallenge_FullMethodName: {AuthMode: AuthAnonymous},
+	}
+}
+
+// sparkSspServicePolicies covers the calls a Spark service provider makes. Each one acts on the caller's own funds
+// (its pool's deposit trees, the leaves it gives in a swap, the deposit it is claiming), so each requires a session and
+// the handler binds it to the session identity.
+func sparkSspServicePolicies() map[string]Policy {
+	return map[string]Policy{
+		pbsspsvc.SparkSspService_PrepareTreeAddress_FullMethodName:                  {AuthMode: AuthSession},
+		pbsspsvc.SparkSspService_CreateTree_FullMethodName:                          {AuthMode: AuthSession},
+		pbsspsvc.SparkSspService_CounterLeafSwapV3_FullMethodName:                   {AuthMode: AuthSession},
+		pbsspsvc.SparkSspService_InitiateUtxoSwap_FullMethodName:                    {AuthMode: AuthSession},
+		pbsspsvc.SparkSspService_ReserveInstantStaticDepositUtxoSwap_FullMethodName: {AuthMode: AuthSession},
+		pbsspsvc.SparkSspService_ClaimInstantStaticDepositUtxoSwap_FullMethodName:   {AuthMode: AuthSession},
 	}
 }
 

@@ -12,6 +12,7 @@ import (
 	pbauthn "github.com/lightsparkdev/spark/proto/spark_authn"
 	pbinternal "github.com/lightsparkdev/spark/proto/spark_internal"
 	pbpartner "github.com/lightsparkdev/spark/proto/spark_partner"
+	pbsspsvc "github.com/lightsparkdev/spark/proto/spark_ssp"
 	pbtoken "github.com/lightsparkdev/spark/proto/spark_token"
 	pbtokeninternal "github.com/lightsparkdev/spark/proto/spark_token_internal"
 	"github.com/lightsparkdev/spark/so"
@@ -50,6 +51,10 @@ func RegisterPublicGrpcServers(
 	// Public partner endpoint
 	sparkPartnerServer := sparkgrpc.NewSparkPartnerServer(rwClient)
 	pbpartner.RegisterSparkPartnerServiceServer(grpcServer, sparkPartnerServer)
+
+	// Public service-provider endpoint
+	sparkSspServer := sparkgrpc.NewSparkSspServer(config)
+	pbsspsvc.RegisterSparkSspServiceServer(grpcServer, sparkSspServer)
 
 	// Public SO token endpoint
 	sparkTokenServer := sparkgrpc.NewSparkTokenServer(config, config, dbClient)
