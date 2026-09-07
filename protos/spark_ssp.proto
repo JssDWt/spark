@@ -1,0 +1,85 @@
+syntax = "proto3";
+
+package spark_ssp;
+
+option go_package = "github.com/lightsparkdev/spark/proto/spark_ssp";
+import "spark.proto";
+
+// The calls a Spark service provider makes that a wallet never does. They are
+// served here rather than on SparkService so that spark.proto stays the file
+// upstream defines, and this one carries the whole SSP surface.
+service SparkSspService {
+    // Prepares the addresses of a deposit tree's nodes, then builds and signs the
+    // tree itself. An SSP turns one on-chain deposit into the denominated leaves
+    // its pool hands out, which is what these two do.
+    rpc prepare_tree_address(spark.PrepareTreeAddressRequest) returns (spark.PrepareTreeAddressResponse) {}
+    rpc create_tree(spark.CreateTreeRequest) returns (spark.CreateTreeResponse) {}
+
+    // Answers a user's swap with the counter transfer. The operators atomically
+    // commit both transfers' sender key tweaks, so neither side can take leaves
+    // without giving leaves in return.
+    rpc counter_leaf_swap_v3(spark.CounterLeafSwapRequest) returns (spark.CounterLeafSwapResponse) {}
+
+    // Claims a static deposit as a fixed-amount UTXO swap: the SSP hands the user a
+    // Spark transfer in exchange for the on-chain UTXO, and the SE co-signs the SSP's
+    // spend transaction. Errors if the UTXO has already been claimed.
+    rpc initiate_utxo_swap(spark.InitiateUtxoSwapRequest) returns (spark.InitiateUtxoSwapResponse) {}
+
+    // The same claim in two phases, so the user is credited before their deposit
+    // confirms: reserve credits them against a UTXO that may be unconfirmed, and
+    // claim completes the swap once it has confirmed.
+    rpc reserve_instant_static_deposit_utxo_swap(ReserveInstantStaticDepositUtxoSwapRequest) returns (ReserveInstantStaticDepositUtxoSwapResponse) {}
+    rpc claim_instant_static_deposit_utxo_swap(ClaimInstantStaticDepositUtxoSwapRequest) returns (ClaimInstantStaticDepositUtxoSwapResponse) {}
+}
+
+// Phase one of the instant (0-conf) static-deposit swap: the SSP asks the SE to credit the
+// user a Spark transfer against a deposit UTXO that may still be unconfirmed. The reservation
+// stays open until the claim phase sweeps the UTXO once it confirms.
+message ReserveInstantStaticDepositUtxoSwapRequest {
+    spark.UTXO on_chain_utxo = 1;
+    // SSP signature over the message consenting to credit a specific amount for a specific UTXO.
+    bytes ssp_signature = 2;
+    // User signature over the message consenting to exchange the UTXO for the SSP's transfer.
+    bytes user_signature = 3;
+    // Transfer package crediting the user, sent from the SSP.
+    spark.StartTransferRequest transfer = 4;
+    // Static deposit address the UTXO was paid to.
+    string destination_address = 5;
+    // UTXO output value in satoshis.
+    int64 value_sats = 6;
+    // Primary credit amount in satoshis.
+    int64 credit_amount_sats = 7;
+    // Optional secondary credit amount in satoshis (claimed with a secondary transfer).
+    int64 secondary_credit_amount_sats = 8;
+    // 9 was a deprecated expiry_time the SO no longer reads.
+    reserved 9;
+    // Requested secondary transfer id, required iff secondary_credit_amount_sats is set.
+    string requested_secondary_transfer_id = 10;
+}
+
+message ReserveInstantStaticDepositUtxoSwapResponse {
+    // Primary transfer crediting the user, sent at reserve time.
+    spark.Transfer transfer = 1;
+    // Reservation handle the claim phase uses to locate this swap.
+    string utxo_swap_id = 2;
+}
+
+// Phase two of the instant static-deposit swap: the reserved UTXO has confirmed, so the SE
+// co-signs the SSP's spend transaction and sends any secondary transfer, then completes the swap.
+message ClaimInstantStaticDepositUtxoSwapRequest {
+    spark.UTXO on_chain_utxo = 1;
+    // Reservation handle returned by the reserve phase.
+    string utxo_swap_id = 2;
+    // Optional secondary transfer package, present iff the reservation has a secondary credit.
+    spark.StartTransferRequest transfer = 3;
+    // Transaction the SSP built spending the UTXO to an address it owns.
+    spark.SigningJob spend_tx_signing_job = 4;
+}
+
+message ClaimInstantStaticDepositUtxoSwapResponse {
+    // SE co-signature over the SSP's spend transaction.
+    spark.SigningResult spend_tx_signing_result = 1;
+    // Secondary transfer, present iff the reservation carried a secondary credit.
+    spark.Transfer transfer = 2;
+    spark.DepositAddressQueryResult deposit_address = 3;
+}
