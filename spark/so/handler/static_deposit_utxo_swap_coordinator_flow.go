@@ -55,6 +55,10 @@ func (f *staticDepositUtxoSwapCoordinatorFlow) PrepareOp() proto.Message {
 	return &pbinternal.StaticDepositUtxoSwapPrepareRequest{
 		OriginalRequest:           f.req,
 		SpendTxSigningCommitments: f.spendCommitments,
+		// Every other SO validates the nested transfer package against the
+		// proofs the coordinator decrypted from its own slice, so they travel
+		// with the prepare.
+		SenderKeyTweakProofs: f.transferCoord.senderKeyTweakProofs,
 	}
 }
 

@@ -8,8 +8,8 @@ import (
 	"github.com/lightsparkdev/spark/common/btcnetwork"
 	"github.com/lightsparkdev/spark/common/keys"
 	pbgossip "github.com/lightsparkdev/spark/proto/gossip"
-	pbsspsvc "github.com/lightsparkdev/spark/proto/spark_ssp"
 	pbinternal "github.com/lightsparkdev/spark/proto/spark_internal"
+	pbsspsvc "github.com/lightsparkdev/spark/proto/spark_ssp"
 	"github.com/lightsparkdev/spark/so"
 	"github.com/lightsparkdev/spark/so/consensus"
 	"github.com/lightsparkdev/spark/so/ent"
@@ -50,7 +50,13 @@ type reserveInstantStaticDepositCoordinatorFlow struct {
 var _ consensus.CoordinatorFlow = (*reserveInstantStaticDepositCoordinatorFlow)(nil)
 
 func (f *reserveInstantStaticDepositCoordinatorFlow) PrepareOp() proto.Message {
-	return &pbinternal.ReserveInstantStaticDepositUtxoSwapPrepareRequest{OriginalRequest: f.req}
+	return &pbinternal.ReserveInstantStaticDepositUtxoSwapPrepareRequest{
+		OriginalRequest: f.req,
+		// Every other SO validates the nested transfer package against the
+		// proofs the coordinator decrypted from its own slice, so they travel
+		// with the prepare.
+		SenderKeyTweakProofs: f.transferCoord.senderKeyTweakProofs,
+	}
 }
 
 // BuildCommitPayload delegates the nested transfer to the send-transfer

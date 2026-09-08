@@ -9,8 +9,8 @@ import (
 	pbcommon "github.com/lightsparkdev/spark/proto/common"
 	pbgossip "github.com/lightsparkdev/spark/proto/gossip"
 	pbspark "github.com/lightsparkdev/spark/proto/spark"
-	pbsspsvc "github.com/lightsparkdev/spark/proto/spark_ssp"
 	pbinternal "github.com/lightsparkdev/spark/proto/spark_internal"
+	pbsspsvc "github.com/lightsparkdev/spark/proto/spark_ssp"
 	"github.com/lightsparkdev/spark/so"
 	"github.com/lightsparkdev/spark/so/consensus"
 	"github.com/lightsparkdev/spark/so/ent"
@@ -48,9 +48,17 @@ type claimInstantStaticDepositCoordinatorFlow struct {
 var _ consensus.CoordinatorFlow = (*claimInstantStaticDepositCoordinatorFlow)(nil)
 
 func (f *claimInstantStaticDepositCoordinatorFlow) PrepareOp() proto.Message {
+	// Every other SO validates the nested transfer package against the proofs
+	// the coordinator decrypted from its own slice, so they travel with the
+	// prepare. Absent when the reservation carries no secondary credit.
+	var senderKeyTweakProofs map[string]*pbspark.SecretProof
+	if f.transferCoord != nil {
+		senderKeyTweakProofs = f.transferCoord.senderKeyTweakProofs
+	}
 	return &pbinternal.ClaimInstantStaticDepositUtxoSwapPrepareRequest{
 		OriginalRequest:           f.req,
 		SpendTxSigningCommitments: f.spendCommitments,
+		SenderKeyTweakProofs:      senderKeyTweakProofs,
 	}
 }
 
